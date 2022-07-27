@@ -48,7 +48,9 @@ jobs:
       with:
         submodules: true
 
-    - uses: pypa/cibuildwheel@v2.8.0
+    - uses: pypa/cibuildwheel@v2.8.1
+      env:
+        CIBW_SKIP: pp*  # Disable building PyPy wheels on all platforms
 
     - name: Verify clean directory
       run: git diff --exit-code
@@ -64,7 +66,7 @@ jobs:
     name: Upload if release
     needs: [build_wheels, build_sdist]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: github.event_name == 'release'
 
     steps:
     - uses: actions/setup-python@v4
