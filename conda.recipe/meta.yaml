@@ -1,0 +1,40 @@
+package:
+  name: fast_tsp
+  version: 0.0.1
+
+source:
+  path: ..
+
+build:
+  number: 0
+  script: python -m pip install . -vvv
+
+requirements:
+  build:
+    - {{ compiler('cxx') }}
+
+  host:
+    - python
+    - pip
+    - pybind11 >=2.6.0
+    - scikit-build
+    - cmake >=3.18
+    - ninja
+
+  run:
+    - python
+
+
+test:
+  imports:
+    - fast_tsp
+  requires:
+    - pytest
+  source_files:
+    - tests
+  commands:
+    - pytest tests
+
+about:
+  summary: A fast TSP solver with Python bindings
+  license_file: LICENSE
