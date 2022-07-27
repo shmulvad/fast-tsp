@@ -1,4 +1,3 @@
-import time
 import pytest
 import fast_tsp
 
@@ -33,14 +32,3 @@ def test_errors_with_negative_duration():
 def test_basic_tour():
     tour = fast_tsp.find_tour([[0, 1, 2], [1, 0, 3], [2, 3, 0]])
     assert tour == [0, 1, 2]
-
-
-@pytest.mark.parametrize('duration_seconds', [0.5, 0.6, 0.7])
-def test_running_duration(duration_seconds):
-    n = 50
-    dists = [[1] * n] * n
-    start_time = time.perf_counter()
-    tour = fast_tsp.find_tour(dists, duration_seconds=duration_seconds)
-    duration = time.perf_counter() - start_time
-    assert duration == pytest.approx(duration_seconds, abs=0.05)
-    assert len(tour) == n
