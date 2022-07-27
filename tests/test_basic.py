@@ -1,8 +1,5 @@
 import time
-
 import pytest
-import numpy as np
-
 import fast_tsp
 
 
@@ -21,11 +18,10 @@ def test_errors_with_too_small_dist():
 
 
 def test_errors_with_non_square_matrix():
-    dists = np.array([[0, 1], [2, 0], [3, 0]])
     with pytest.raises(ValueError) as exc_info:
-        fast_tsp.find_tour(dists)
+        fast_tsp.find_tour([[0, 1], [2, 0], [3, 0]])
 
-    exp_msg = f'Distance matrix must be square but got {dists.shape}'
+    exp_msg = f'Distance matrix must be square but got (3, 2)'
     assert str(exc_info.value) == exp_msg
 
 
@@ -35,15 +31,14 @@ def test_errors_with_negative_duration():
 
 
 def test_basic_tour():
-    dists = np.array([[0, 1, 2], [1, 0, 3], [2, 3, 0]])
-    tour = fast_tsp.find_tour(dists)
+    tour = fast_tsp.find_tour([[0, 1, 2], [1, 0, 3], [2, 3, 0]])
     assert tour == [0, 1, 2]
 
 
 @pytest.mark.parametrize('duration_seconds', [0.5, 0.6, 0.7])
 def test_running_duration(duration_seconds):
     n = 50
-    dists = (np.random.rand(n, n) * 100).astype(np.int64)
+    dists = [[1] * n] * n
     start_time = time.perf_counter()
     tour = fast_tsp.find_tour(dists, duration_seconds=duration_seconds)
     duration = time.perf_counter() - start_time
