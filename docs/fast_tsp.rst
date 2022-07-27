@@ -1,0 +1,1 @@
+.. automodule:: fast_tsp
