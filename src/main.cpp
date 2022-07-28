@@ -543,9 +543,9 @@ PYBIND11_MODULE(_core, m) {
     )pbdoc";
 
     m.def("find_tour", &find_tour, R"pbdoc(
-        Find the best TSP tour
+        Find a good TSP tour
 
-
+        Run a local solver to find a good TSP tour.
     )pbdoc", py::arg("dists"), py::arg("duration_seconds") = DEFAULT_TIME_LIMIT);
 
 #ifdef VERSION_INFO

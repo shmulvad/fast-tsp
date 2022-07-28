@@ -1,4 +1,6 @@
 import sys
+import os
+import io
 
 try:
     from skbuild import setup
@@ -12,10 +14,23 @@ except ImportError:
 
 from setuptools import find_packages
 
+DIR = os.path.abspath(os.path.dirname(__file__))
+DESCRIPTION = "A fast TSP solver with Python bindings"
+
+# Import the README and use it as the long-description.
+try:
+    with io.open(os.path.join(DIR, 'README.md'), encoding='utf-8') as f:
+        long_description = '\n' + f.read()
+except FileNotFoundError:
+    long_description = DESCRIPTION
+
+
 setup(
     name="fast_tsp",
     version="0.0.1",
-    description="A fast TSP solver with Python bindings",
+    description=DESCRIPTION,
+    long_description=long_description,
+    long_description_content_type='text/markdown',
     author="Søren Mulvad",
     license="MIT",
     packages=find_packages(where="src"),
