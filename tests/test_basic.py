@@ -3,7 +3,7 @@ import fast_tsp
 
 
 def test_version():
-    assert fast_tsp.__version__ == "0.0.1"
+    assert fast_tsp.__version__ == "0.1.0"
 
 
 def test_errors_with_wrong_signature():

@@ -2,10 +2,10 @@ name: Wheels
 
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches:
-     - main
+  # pull_request:
+  # push:  # Disabled since it uses all my GitHub Actions time
+  #   branches:
+  #    - main
   release:
     types:
       - published
@@ -38,6 +38,7 @@ jobs:
   build_wheels:
     name: Wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    if: github.event_name == 'release'
     strategy:
       fail-fast: false
       matrix:
@@ -56,13 +57,15 @@ jobs:
       run: python -m pip install --verbose .[test]
 
     - name: Remove CMake build directory
-      run: rm -rf build/ _skbuild/ dist/
+      run: rm -rf build/ _skbuild/
 
     - name: Install cibuildwheel
       run: python -m pip install cibuildwheel==2.8.1
 
     - name: Build wheels
       run: python -m cibuildwheel --output-dir wheelhouse
+      env:
+        CIBW_SKIP: pp*  # Disable building PyPy wheels on all platforms
 
     - name: Upload wheels
       uses: actions/upload-artifact@v3

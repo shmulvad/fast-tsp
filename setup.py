@@ -27,7 +27,7 @@ except FileNotFoundError:
 
 setup(
     name='fast_tsp',
-    version='0.0.1',
+    version='0.1.0',
     description=DESCRIPTION,
     long_description=long_description,
     long_description_content_type='text/markdown',
