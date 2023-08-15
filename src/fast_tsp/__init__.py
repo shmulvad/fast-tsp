@@ -22,6 +22,8 @@ for the TSP solver. To use it, first import it
     compute_cost
     score_tour
 """
+from __future__ import annotations
+
 from typing import Union, List
 import warnings
 import numpy as np
@@ -39,6 +41,67 @@ from ._core import (  # type: ignore
 
 Tour = List[int]
 DistMatrix = Union[List[List[int]], np.ndarray]
+
+_UINT16_MAX = 2 ** 16 - 1
+
+
+def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
+    """
+    Returns a string describing the error if the distance matrix is invalid,
+    otherwise returns None.
+    Checks the following:
+    - The distance matrix is non-empty.
+    - The distance matrix is 2D and square.
+    - The distance matrix contains only non-negative integers.
+    - The distance matrix contains only integers that fit in a uint16.
+    - The diagonal is 0.
+    - The distance matrix is symmetric.
+    - The distance matrix satisfies the triangle inequality.
+    """
+    try:
+        dists = np.array(dists)
+    except Exception as e:
+        return f'Could not convert the distance matrix to a numpy array: {e}'
+
+    if len(dists.shape) != 2:
+        return 'Distance matrix must be 2D'
+
+    n, m = dists.shape
+    if n != m:
+        return f'Distance matrix must be square, but got ({n}, {m})'
+
+    if n == 0:
+        return 'Distance matrix must be non-empty'
+
+    if isinstance(dists[0][0], float):
+        typ = type(dists[0][0])
+        return f'Distance matrix must contain integers, but found {typ}'
+
+    min_val: int = np.min(dists)  # type: ignore
+    max_val: int = np.max(dists)  # type: ignore
+    if min_val < 0:
+        return f'All distances must be non-negative, but found {min_val:,}'
+    if max_val > _UINT16_MAX:
+        return (
+            f'All distances must be <= {_UINT16_MAX:,}, but found {max_val:,}'
+        )
+
+    if not np.all(np.diag(dists) == 0):
+        return 'Distance matrix diagonal must be 0'
+
+    if not np.all(dists == dists.T):
+        return 'Distance matrix must be symmetric'
+
+    # Check that the distance matrix satisfies the triangle inequality
+    for i in range(n):
+        for j in range(i):
+            if not all(dists[i, j] <= dists[i, :] + dists[:, j]):
+                return (
+                    f'Distance matrix does not satisfy the triangle inequality'
+                    f' for cities {i} and {j}'
+                )
+
+    return None
 
 
 def find_tour(dists: DistMatrix, duration_seconds: float = 2.0) -> Tour:
@@ -61,7 +124,17 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0) -> Tour:
       print(tour)
       # [0, 1]
     """
-    return __find_tour(dists, duration_seconds)
+    try:
+        return __find_tour(dists, duration_seconds)
+    except Exception as e:
+        dist_matrix_error_msg = is_valid_dist_matrix(dists)
+        if dist_matrix_error_msg is None:
+            raise
+        else:
+            raise ValueError(
+                f'An exception occurred while running the solver: {e}\n'
+                f'Invalid distance matrix: {dist_matrix_error_msg}'
+            ) from e
 
 
 def greedy_nearest_neighbor(dists: DistMatrix) -> Tour:

@@ -10,7 +10,7 @@ This is a short description of how to use the :pyt:`fast-tsp` module.
 Installation
 #############
 
-The module can be installed using Pip:
+The module can be installed using pip:
 
 .. code-block:: bash
 
@@ -69,6 +69,26 @@ The tour is a list of indices that correspond to the order of the nodes in the
 supplied distance matrix. E.g. [0, 52, 1] would imply that the tour starts at
 index 0, goes to the node at index 52, goes to node 1, and finally ends at node
 0 again, closing the tour.
+
+
+
+Help, I'm getting errors when I run the module
+######################################################
+
+If you are getting errors while running the module, make sure you are fulfilling
+the following requirements:
+
+* The distance matrix should be a square 2D matrix of integers.
+* The distance matrix should satisfy the triangle inequality.
+* The distance matrix should be symmetric.
+* The distance matrix should be positive.
+* The distance matrix should be zero on the diagonal.
+* The distance matrix should be less than 2^16 - 1 (the maximum value for an unsigned 16-bit integer).
+
+You can check whether your distance matrix fulfills these requirements by using
+the :pyt:`is_valid_distance_matrix` function. If you are still getting errors,
+please open an issue on the `GitHub page <https://github.com/shmulvad/fast-tsp>`.
+
 
 
 Exact solution

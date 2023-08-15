@@ -27,7 +27,7 @@ except FileNotFoundError:
 
 setup(
     name='fast_tsp',
-    version='0.1.0',
+    version='0.1.1',
     description=DESCRIPTION,
     long_description=long_description,
     long_description_content_type='text/markdown',
@@ -40,7 +40,7 @@ setup(
     cmake_install_dir='src/fast_tsp',
     package_data={'src': ['py.typed']},
     include_package_data=True,
-    python_requires='>=3.6',
+    python_requires='>=3.8',
     install_requires=['numpy>=1.0.0'],
     extras_require={
         'test': ['pytest', 'numpy'],

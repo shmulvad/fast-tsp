@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15...3.22)
 
-project(fast_tsp VERSION "0.1.0")
+project(fast_tsp VERSION "0.1.1")
 
 if(SKBUILD)
   # Scikit-Build does not add your site-packages to the search path
