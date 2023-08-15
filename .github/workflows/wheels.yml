@@ -56,8 +56,15 @@ jobs:
     - name: Build and install
       run: python -m pip install --verbose .[test]
 
-    - name: Remove CMake build directory
-      run: rm -rf build/ _skbuild/
+    - name: Remove CMake build directory (1/2)
+      uses: JesseTG/rm@v1.0.3
+      with:
+        path: ./build
+
+    - name: Remove CMake build directory (2/2)
+      uses: JesseTG/rm@v1.0.3
+      with:
+        path: ./_skbuild
 
     - name: Install cibuildwheel
       run: python -m pip install cibuildwheel==2.8.1
