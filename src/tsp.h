@@ -213,7 +213,7 @@ void reverse_tour(uint_fast16_t n, Tour& tour, uint_fast16_t start, uint_fast16_
 
 Tour greedy_nearest_neighbor(const IntMatrix& dist) {
     uint_fast16_t n = dist.size();
-    bool used[n];
+    bool *used = new bool[n];
     for (uint_fast16_t i = 0; i < n; ++i) {
         used[i] = false;
     }
@@ -233,6 +233,7 @@ Tour greedy_nearest_neighbor(const IntMatrix& dist) {
         tour[i] = best_idx;
         used[best_idx] = true;
     }
+    delete[] used;
     return tour;
 }
 
