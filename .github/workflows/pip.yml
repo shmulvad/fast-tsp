@@ -9,23 +9,20 @@ on:
 
 jobs:
   build:
-    name: Build with Pip
+    name: Install locally with pip
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
-        python-version: ["3.11"]
-
+        python-version: ["3.9", "3.12"]
     steps:
-    - uses: actions/checkout@v3
-
+    - uses: actions/checkout@v4
     - uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
-
+    - run: pip install --upgrade pip wheel
     - name: Build and install
-      run: pip install --verbose .[test]
-
+      run: pip install --verbose ".[test]"
     - name: Test
       run: pytest tests/

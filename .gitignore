@@ -1,6 +1,8 @@
 # Using https://github.com/github/gitignore/blob/master/Python.gitignore
 
 
+.conda/
+.ruff_cache/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

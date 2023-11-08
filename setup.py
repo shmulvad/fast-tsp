@@ -1,6 +1,8 @@
+from __future__ import annotations
+
+import pathlib
+import re
 import sys
-import os
-import io
 
 try:
     from skbuild import setup
@@ -14,24 +16,38 @@ except ImportError:
 
 from setuptools import find_packages
 
-DIR = os.path.abspath(os.path.dirname(__file__))
-DESCRIPTION = "A fast TSP solver with Python bindings"
+BASE_DIR = pathlib.Path(__file__).resolve().parent
+DESCRIPTION = 'A fast TSP solver with Python bindings'
+
+
+def parse_version() -> str:
+    """Returns the version specified in CMakeLists.txt"""
+    pattern = re.compile(r'project\(fast_tsp VERSION "([\d\.]+)"\)')
+    cmake_file = BASE_DIR / 'CMakeLists.txt'
+    lines = cmake_file.read_text(encoding='utf-8').splitlines()
+    for line in lines:
+        line_match = pattern.match(line)
+        if line_match:
+            return line_match.group(1)
+    raise RuntimeError('Could not parse version')
+
 
 # Import the README and use it as the long-description.
 try:
-    with io.open(os.path.join(DIR, 'README.md'), encoding='utf-8') as f:
-        long_description = '\n' + f.read()
+    readme = BASE_DIR / 'README.md'
+    long_description = readme.read_text(encoding='utf-8')
 except FileNotFoundError:
     long_description = DESCRIPTION
 
+VERSION = parse_version()
 
 setup(
     name='fast_tsp',
-    version='0.1.2',
+    version=VERSION,
     description=DESCRIPTION,
     long_description=long_description,
     long_description_content_type='text/markdown',
-    author='Søren Mulvad',
+    author='Soeren Mulvad',
     author_email='shmulvad@gmail.com',
     url='http://github.com/shmulvad/fast-tsp',
     license='MIT',
@@ -40,7 +56,7 @@ setup(
     cmake_install_dir='src/fast_tsp',
     package_data={'src': ['py.typed']},
     include_package_data=True,
-    python_requires='>=3.8',
+    python_requires='>=3.9',
     install_requires=['numpy>=1.0.0'],
     extras_require={
         'test': ['pytest', 'numpy'],

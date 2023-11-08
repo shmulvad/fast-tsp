@@ -1,9 +1,7 @@
-import pytest
+from __future__ import annotations
+
 import fast_tsp
-
-
-def test_version():
-    assert fast_tsp.__version__ == '0.1.2'
+import pytest
 
 
 def test_errors_with_wrong_signature():
@@ -36,14 +34,8 @@ def test_errors_with_negative_value():
 
 def test_errors_with_too_large_value():
     too_large_val = fast_tsp._UINT16_MAX + 1
-    err_msg = fast_tsp.is_valid_dist_matrix([
-        [0, too_large_val],
-        [too_large_val, 0]
-    ])
-    assert err_msg == (
-        f'All distances must be <= {fast_tsp._UINT16_MAX:,}, '
-        f'but found {too_large_val:,}'
-    )
+    err_msg = fast_tsp.is_valid_dist_matrix([[0, too_large_val], [too_large_val, 0]])
+    assert err_msg == f'All distances must be <= {fast_tsp._UINT16_MAX:,}, but found {too_large_val:,}'
 
 
 def test_errors_with_negative_duration():

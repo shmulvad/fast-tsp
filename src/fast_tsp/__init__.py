@@ -22,27 +22,27 @@ for the TSP solver. To use it, first import it
     compute_cost
     score_tour
 """
+
 from __future__ import annotations
 
-from typing import Union, List
 import warnings
+from typing import List
+from typing import Union
+
 import numpy as np
 
-from ._core import (  # type: ignore
-    # __doc__,
-    __version__,
-    find_tour as __find_tour,
-    is_valid_tour as __is_valid_tour,
-    compute_cost as __compute_cost,
-    greedy_nearest_neighbor as __greedy_nearest_neighbor,
-    solve_tsp_exact as __solve_tsp_exact,
-    score_tour as __score_tour,
-)
+from ._core import __version__  # type: ignore
+from ._core import compute_cost as __compute_cost  # type: ignore
+from ._core import find_tour as __find_tour  # type: ignore
+from ._core import greedy_nearest_neighbor as __greedy_nearest_neighbor  # type: ignore
+from ._core import is_valid_tour as __is_valid_tour  # type: ignore
+from ._core import score_tour as __score_tour  # type: ignore
+from ._core import solve_tsp_exact as __solve_tsp_exact  # type: ignore
 
 Tour = List[int]
 DistMatrix = Union[List[List[int]], np.ndarray]
 
-_UINT16_MAX = 2 ** 16 - 1
+_UINT16_MAX = 2**16 - 1
 
 
 def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
@@ -82,9 +82,7 @@ def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
     if min_val < 0:
         return f'All distances must be non-negative, but found {min_val:,}'
     if max_val > _UINT16_MAX:
-        return (
-            f'All distances must be <= {_UINT16_MAX:,}, but found {max_val:,}'
-        )
+        return f'All distances must be <= {_UINT16_MAX:,}, but found {max_val:,}'
 
     if not np.all(np.diag(dists) == 0):
         return 'Distance matrix diagonal must be 0'
@@ -96,10 +94,7 @@ def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
     for i in range(n):
         for j in range(i):
             if not all(dists[i, j] <= dists[i, :] + dists[:, j]):
-                return (
-                    f'Distance matrix does not satisfy the triangle inequality'
-                    f' for cities {i} and {j}'
-                )
+                return f'Distance matrix does not satisfy the triangle inequality for cities {i} and {j}'
 
     return None
 
@@ -132,8 +127,7 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0) -> Tour:
             raise
         else:
             raise ValueError(
-                f'An exception occurred while running the solver: {e}\n'
-                f'Invalid distance matrix: {dist_matrix_error_msg}'
+                f'An exception occurred while running the solver: {e}\nInvalid distance matrix: {dist_matrix_error_msg}'
             ) from e
 
 
@@ -168,8 +162,8 @@ def solve_tsp_exact(dists: DistMatrix) -> Tour:
     """
     if len(dists) > 20:
         warnings.warn(
-            "The exact algorithm is not recommended for n > 20. "
-            "Consider using the fast heuristic instead."
+            'The exact algorithm is not recommended for n > 20. Consider using the fast heuristic instead.',
+            stacklevel=2,
         )
     return __solve_tsp_exact(dists)
 
