@@ -31,17 +31,13 @@ jobs:
         path: dist/*.tar.gz
 
   build_wheels:
-    name: Wheels on ${{ matrix.builds.os }}
-    runs-on: ${{ matrix.builds.os }}
+    name: Wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     if: github.event_name == 'release'
     strategy:
       fail-fast: false
       matrix:
-        builds: [
-          {os: "macOS-latest", python_requires: ">=3.9.0"},
-          {os: "ubuntu-latest", python_requires: ">=3.9.0"},
-          {os: "windows-latest", python_requires: ">=3.9.0"},
-        ]
+        os: ["macOS-latest", "ubuntu-latest", "windows-latest"]
     steps:
     - uses: actions/checkout@v4
       with:
@@ -50,7 +46,7 @@ jobs:
       with:
         python-version: '3.x'
     - name: Build and install
-      run: python -m pip install --verbose .[test]
+      run: python -m pip install --verbose ".[test]"
     - name: Remove CMake build directory (1/2)
       uses: JesseTG/rm@v1.0.3
       with:
@@ -64,10 +60,10 @@ jobs:
     - name: Build wheels
       run: python -m cibuildwheel --output-dir wheelhouse
       env:
-        CIBW_PROJECT_REQUIRES_PYTHON: ${{ matrix.builds.python_requires }}
+        CIBW_PROJECT_REQUIRES_PYTHON: ">=3.8.0"
         CIBW_BUILD: "cp3*"
         CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-        CIBW_ARCHS_LINUX: "auto aarch64"
+        CIBW_ARCHS_LINUX: "x86_64 aarch64"
         CIBW_ARCHS_WINDOWS: "x86 AMD64 ARM64"
     - name: Upload wheels
       uses: actions/upload-artifact@v3
