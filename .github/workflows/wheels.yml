@@ -63,7 +63,7 @@ jobs:
         CIBW_PROJECT_REQUIRES_PYTHON: ">=3.8.0"
         CIBW_BUILD: "cp3*"
         CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-        CIBW_ARCHS_LINUX: "x86_64 aarch64"
+        CIBW_ARCHS_LINUX: "auto64"
         CIBW_ARCHS_WINDOWS: "x86 AMD64 ARM64"
     - name: Upload wheels
       uses: actions/upload-artifact@v3
