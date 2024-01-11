@@ -38,6 +38,10 @@ Documentation can be found at <https://fast-tsp.readthedocs.io/>.
 
 You can build the documentation by `cd`ing to `docs/` and running `make clean && make html`.
 
+### Citation
+
+If you find that this project helps your research, please consider citing it using the metadata from the `CITATION.cff` file.
+
 ### License
 
 This library uses `pybind11` which is provided under a BSD-style license that can be found in the LICENSE file. By using, distributing, or contributing to this project, you agree to the terms and conditions of this license.
