@@ -65,7 +65,7 @@ jobs:
         CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
         CIBW_ARCHS_LINUX: "auto64"
         CIBW_ARCHS_WINDOWS: "x86 AMD64"
-        CIBW_TEST_SKIP: "*-macosx_arm64"
+        CIBW_TEST_SKIP: "*-macosx_arm64 *-macosx_universal2:arm64"
     - name: Upload wheels
       uses: actions/upload-artifact@v3
       with:

@@ -4,7 +4,7 @@
 [![Pip Actions Status][actions-pip-badge]][actions-pip-link]
 [![PyPI - Version](https://img.shields.io/pypi/v/fast-tsp)][pypi]
 [![GitHub issues](https://img.shields.io/github/issues/shmulvad/fast-tsp?style=flat-square)](https://github.com/shmulvad/fast-tsp/issues)
-[![GitHub license](https://img.shields.io/badge/license-BSD-success?style=flat-square)][LICENSE]
+[![GitHub license](https://img.shields.io/github/license/shmulvad/fast-tsp?style=flat-square)][LICENSE]
 
 
 A library for computing near optimal solution to large instances of the TSP (Travelling Salesman Problem) fast using a local solver. The library is written in C++ and provides Python bindings.
