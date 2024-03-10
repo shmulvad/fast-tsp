@@ -4,7 +4,7 @@
 [![Pip Actions Status][actions-pip-badge]][actions-pip-link]
 [![PyPI - Version](https://img.shields.io/pypi/v/fast-tsp)][pypi]
 [![GitHub issues](https://img.shields.io/github/issues/shmulvad/fast-tsp?style=flat-square)](https://github.com/shmulvad/fast-tsp/issues)
-[![GitHub license](https://img.shields.io/badge/license-BSD-success?style=flat-square)][license]
+[![GitHub license](https://img.shields.io/badge/license-BSD-success?style=flat-square)][LICENSE]
 
 
 A library for computing near optimal solution to large instances of the TSP (Travelling Salesman Problem) fast using a local solver. The library is written in C++ and provides Python bindings.
@@ -44,9 +44,9 @@ If you find that this project helps your research, please consider citing it usi
 
 ### License
 
-This library uses `pybind11` which is provided under a BSD-style license that can be found in the LICENSE file. By using, distributing, or contributing to this project, you agree to the terms and conditions of this license.
+This library is licensed under the MIT license. Additionally, it uses `pybind11` which is provided under a BSD-style license that can be found in the [LICENSE] file. By using, distributing, or contributing to this project, you agree to the terms and conditions of this license.
 
-[license]: https://github.com/shmulvad/fast-tsp/blob/main/LICENSE
+[LICENSE]: https://github.com/shmulvad/fast-tsp/blob/main/LICENSE
 [actions-pip-link]: https://github.com/shmulvad/fast-tsp/actions?query=workflow%3APip
 [actions-pip-badge]: https://github.com/shmulvad/fast-tsp/workflows/Pip/badge.svg
 [pypi]: https://pypi.org/project/fast-tsp/

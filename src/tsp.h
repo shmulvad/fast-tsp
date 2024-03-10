@@ -195,7 +195,8 @@ Tour double_bridge_move(uint_fast16_t n, Tour& tour) {
     return new_tour;
 }
 
-// Copied reverse method from: https://github.com/estan/tsp/blob/master/tsp.cpp
+// The below method is copy-pasted from estan/tsp
+// See LICENSE file for more details
 void reverse_tour(uint_fast16_t n, Tour& tour, uint_fast16_t start, uint_fast16_t end, uint_fast16_t* position) {
     uint_fast16_t num_swaps = (((start <= end ? end - start : (end + n) - start) + 1) / 2);
     uint_fast16_t i = start;

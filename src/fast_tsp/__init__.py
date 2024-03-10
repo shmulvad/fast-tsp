@@ -217,10 +217,10 @@ def score_tour(tour: Tour, dists: DistMatrix, opt_cost: int) -> float:
 
 __all__ = [
     '__version__',
+    'compute_cost',
     'find_tour',
     'greedy_nearest_neighbor',
-    'solve_tsp_exact',
     'is_valid_tour',
-    'compute_cost',
     'score_tour',
+    'solve_tsp_exact',
 ]

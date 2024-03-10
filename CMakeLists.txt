@@ -1,6 +1,17 @@
 cmake_minimum_required(VERSION 3.15...3.28)
 
-project(fast_tsp VERSION "0.1.8")
+project(fast_tsp VERSION "0.1.3")
+
+if(SKBUILD)
+  # Scikit-Build does not add your site-packages to the search path
+  # automatically, so we need to add it _or_ the pybind11 specific directory
+  # here.
+  set(Python_EXECUTABLE "${PYTHON_EXECUTABLE}")
+  set(Python_INCLUDE_DIR "${PYTHON_INCLUDE_DIR}")
+  set(Python_LIBRARY "${PYTHON_LIBRARY}")
+endif()
+
+find_package(Python COMPONENTS Interpreter Development.Module)
 
 if(SKBUILD)
   # Scikit-Build does not add your site-packages to the search path

@@ -34,12 +34,10 @@ repos:
   - id: check-json
   - id: name-tests-test
 - repo: https://github.com/charliermarsh/ruff-pre-commit
-  rev: 'v0.1.4'
+  rev: 'v0.3.2'
   hooks:
   - id: ruff
-- repo: https://github.com/charliermarsh/ruff-pre-commit
-  rev: 'v0.1.4'
-  hooks:
+    args: [--fix]
   - id: ruff-format
     args: [--check]
 

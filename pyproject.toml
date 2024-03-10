@@ -15,10 +15,10 @@ exclude = [
     "*.pyc"  ,
     "__pycache__",
 ]
-ignore = ["S101", "ANN101", "B904", "COM812", "E203"]
+lint.ignore = ["S101", "ANN101", "B904", "COM812", "E203"]
 line-length = 127
 # See https://beta.ruff.rs/docs/rules/ for more information
-select = [
+lint.select = [
     "C9",
     "E",
     "F",
@@ -40,27 +40,27 @@ select = [
     "NPY",
     "RUF",
 ]
-ignore-init-module-imports = true
+lint.ignore-init-module-imports = true
 target-version = "py38"
 
 [tool.ruff.format]
 quote-style = "single"
 
-[tool.ruff.mccabe]
+[tool.ruff.lint.mccabe]
 max-complexity = 20
 
-[tool.ruff.flake8-quotes]
+[tool.ruff.lint.flake8-quotes]
 docstring-quotes = "double"
 inline-quotes = "single"
 multiline-quotes = "double"
 
-[tool.ruff.flake8-import-conventions]
-[tool.ruff.flake8-import-conventions.aliases]
+[tool.ruff.lint.flake8-import-conventions]
+[tool.ruff.lint.flake8-import-conventions.aliases]
 constants = "const"
 
-[tool.ruff.isort]
+[tool.ruff.lint.isort]
 force-single-line = true
 required-imports = ["from __future__ import annotations"]
 
-[tool.ruff.flake8-builtins]
+[tool.ruff.lint.flake8-builtins]
 builtins-ignorelist = ["id", "type"]
