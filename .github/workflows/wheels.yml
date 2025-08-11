@@ -19,7 +19,7 @@ jobs:
     name: Build SDist
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - name: Build SDist
@@ -39,7 +39,7 @@ jobs:
       matrix:
         os: ["macOS-latest", "ubuntu-latest", "windows-latest"]
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         submodules: true
     - uses: actions/setup-python@v5
