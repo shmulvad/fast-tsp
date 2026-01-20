@@ -56,7 +56,7 @@ setup(
     cmake_install_dir='src/fast_tsp',
     package_data={'src': ['py.typed']},
     include_package_data=True,
-    python_requires='>=3.8',
+    python_requires='>=3.10',
     install_requires=['numpy>=1.0.0'],
     extras_require={
         'test': ['pytest', 'numpy'],
