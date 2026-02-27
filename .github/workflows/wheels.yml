@@ -26,7 +26,7 @@ jobs:
       run: pipx run build --sdist
     - name: Check metadata
       run: pipx run twine check dist/*
-    - uses: actions/upload-artifact@v6
+    - uses: actions/upload-artifact@v7
       with:
         name: sdist
         path: dist/*.tar.gz
@@ -68,7 +68,7 @@ jobs:
         CIBW_ARCHS_WINDOWS: "x86 AMD64"
         CIBW_TEST_SKIP: "*-macosx_arm64 *-macosx_universal2:arm64"
     - name: Upload wheels
-      uses: actions/upload-artifact@v6
+      uses: actions/upload-artifact@v7
       with:
         name: wheels-${{ matrix.os }}
         path: wheelhouse/*.whl
