@@ -65,11 +65,11 @@ author = 'Søren Mulvad'
 #
 # The short X.Y version.
 def parse_version() -> str:
-    """Returns the version specified in CMakeLists.txt"""
+    """Returns the version specified in Cargo.toml"""
     base_dir = Path(__file__).resolve().parent.parent
-    pattern = re.compile(r'project\(fast_tsp VERSION "([\d\.]+)"\)')
-    cmake_file = base_dir / 'CMakeLists.txt'
-    lines = cmake_file.read_text(encoding='utf-8').splitlines()
+    pattern = re.compile(r'version = "([\d\.]+)"')
+    cargo_file = base_dir / 'Cargo.toml'
+    lines = cargo_file.read_text(encoding='utf-8').splitlines()
     for line in lines:
         line_match = pattern.match(line)
         if line_match:
@@ -306,4 +306,4 @@ texinfo_documents = [
 
 
 # Example configuration for intersphinx: refer to the Python standard library.
-intersphinx_mapping = {'https://docs.python.org/': None}
+intersphinx_mapping = {'python': ('https://docs.python.org/3', None)}

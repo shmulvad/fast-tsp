@@ -16,12 +16,19 @@ The module can be installed using pip:
 
     $ pip install fast-tsp
 
+numpy is optional. Distance matrices can be plain lists of lists, or integer
+numpy arrays, which are read directly without per-element conversion. To
+install numpy alongside, use :pyt:`pip install "fast-tsp[numpy]"`.
+
 
 Example usage
 ##############
 
-The program works on a distance matrix. The distance matrix should be a square
-2D matrix of integers. Note that the distance matrix should satisfy the
+The program works on a distance matrix. The distance matrix should be a square,
+symmetric 2D matrix of integers, so the distance from :pyt:`i` to :pyt:`j` must
+equal the distance from :pyt:`j` to :pyt:`i`. The heuristic used for more than
+20 nodes relies on this and will not find good tours for asymmetric matrices.
+Note that the distance matrix should satisfy the
 triangle inequality, otherwise the results might not make sense. For most
 real-world problems, this inequality is satisfied. Note that for speed reasons,
 this module requires the distance matrix to be integers. If you have a use-case
@@ -69,6 +76,25 @@ The tour is a list of indices that correspond to the order of the nodes in the
 supplied distance matrix. E.g. [0, 52, 1] would imply that the tour starts at
 index 0, goes to the node at index 52, goes to node 1, and finally ends at node
 0 again, closing the tour.
+
+
+Using multiple cores
+#####################
+
+By default the search runs on one thread. Pass :pyt:`max_threads` to let
+several threads search together. They share the best tour found so far, so
+4 threads find tours about as good as 1 thread given 4 times as long. Pass
+:pyt:`None` to use one fewer than the number of available CPU cores:
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=1.0, max_threads=None)
+
+The time limit is the same whatever the number of threads. Problems of 20
+nodes or fewer are solved exactly on one thread, and :pyt:`max_threads` is
+never allowed to exceed the number of available cores. If you are already
+solving many problems in parallel (e.g. with :pyt:`multiprocessing`), keep the
+default of 1.
 
 
 

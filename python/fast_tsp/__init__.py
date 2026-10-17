@@ -26,10 +26,10 @@ for the TSP solver. To use it, first import it
 from __future__ import annotations
 
 import warnings
+from typing import TYPE_CHECKING
+from typing import Any
 from typing import List
 from typing import Union
-
-import numpy as np
 
 from ._core import __version__  # type: ignore
 from ._core import compute_cost as __compute_cost  # type: ignore
@@ -39,8 +39,13 @@ from ._core import is_valid_tour as __is_valid_tour  # type: ignore
 from ._core import score_tour as __score_tour  # type: ignore
 from ._core import solve_tsp_exact as __solve_tsp_exact  # type: ignore
 
+if TYPE_CHECKING:
+    import numpy as np
+
 Tour = List[int]
-DistMatrix = Union[List[List[int]], np.ndarray]
+# numpy is optional (`pip install fast_tsp[numpy]`). Integer numpy arrays are
+# read directly by the Rust core without converting each element.
+DistMatrix = Union[List[List[int]], 'np.ndarray']
 
 _UINT16_MAX = 2**16 - 1
 
@@ -57,7 +62,14 @@ def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
     - The diagonal is 0.
     - The distance matrix is symmetric.
     - The distance matrix satisfies the triangle inequality.
+
+    Uses numpy when it is installed and a pure-Python fallback otherwise.
     """
+    try:
+        import numpy as np
+    except ImportError:
+        return _check_dist_matrix_pure_python(dists)
+
     try:
         dists = np.array(dists)
     except Exception as e:
@@ -99,15 +111,67 @@ def is_valid_dist_matrix(dists: DistMatrix) -> str | None:
     return None
 
 
-def find_tour(dists: DistMatrix, duration_seconds: float = 2.0) -> Tour:
+def _check_dist_matrix_pure_python(dists: Any) -> str | None:
+    """Same checks and messages as `is_valid_dist_matrix`, without numpy."""
+    try:
+        rows = [list(row) for row in dists]
+    except TypeError:
+        return 'Distance matrix must be 2D'
+
+    n = len(rows)
+    for row in rows:
+        if len(row) != n:
+            return f'Distance matrix must be square, but got ({n}, {len(row)})'
+    if n == 0:
+        return 'Distance matrix must be non-empty'
+
+    for row in rows:
+        for val in row:
+            if isinstance(val, (list, tuple)):
+                return 'Distance matrix must be 2D'
+            if not isinstance(val, int):
+                return f'Distance matrix must contain integers, but found {type(val)}'
+
+    min_val = min(min(row) for row in rows)
+    max_val = max(max(row) for row in rows)
+    if min_val < 0:
+        return f'All distances must be non-negative, but found {min_val:,}'
+    if max_val > _UINT16_MAX:
+        return f'All distances must be <= {_UINT16_MAX:,}, but found {max_val:,}'
+
+    if any(rows[i][i] != 0 for i in range(n)):
+        return 'Distance matrix diagonal must be 0'
+
+    if any(rows[i][j] != rows[j][i] for i in range(n) for j in range(i)):
+        return 'Distance matrix must be symmetric'
+
+    for i in range(n):
+        for j in range(i):
+            dist_ij = rows[i][j]
+            if any(dist_ij > rows[i][k] + rows[k][j] for k in range(n)):
+                return f'Distance matrix does not satisfy the triangle inequality for cities {i} and {j}'
+
+    return None
+
+
+def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int | None = 1) -> Tour:
     """Find a tour using the fast heuristic.
 
     Run a local solver to find a near-optimal TSP tour. For small
     problems, the exact solution is returned.
 
+    The distance matrix must be symmetric (``dists[i][j] == dists[j][i]``).
+    The local search used for more than 20 nodes relies on this and does
+    not find good tours for asymmetric matrices.
+
     Args:
-        dists: A distance matrix.
+        dists: A symmetric distance matrix.
         duration_seconds: The maximum duration of the tour.
+        max_threads: How many threads search together. More threads find
+            better tours in the same time, mainly for larger problems.
+            ``None`` uses one fewer than the number of available CPU cores.
+            Never more than the number of cores is used. Has no effect for
+            problems of 20 nodes or fewer, which are solved exactly.
 
     Returns:
         A tour that is ideally near-optimal.
@@ -120,7 +184,7 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0) -> Tour:
       # [0, 1]
     """
     try:
-        return __find_tour(dists, duration_seconds)
+        return __find_tour(dists, duration_seconds, max_threads)
     except Exception as e:
         dist_matrix_error_msg = is_valid_dist_matrix(dists)
         if dist_matrix_error_msg is None:

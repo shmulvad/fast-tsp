@@ -7,21 +7,59 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
+  rust:
+    name: Rust fmt, clippy and tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+    - uses: Swatinem/rust-cache@v2
+    - run: cargo fmt --check
+    - run: cargo clippy --all-targets -- -D warnings
+    - run: cargo clippy --all-targets --features python -- -D warnings
+    - run: cargo clippy --all-targets --all-features -- -D warnings
+    - run: cargo test
+
+  no-numpy:
+    name: Install and test without numpy
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: actions/setup-python@v6
+      with:
+        python-version: "3.12"
+    - name: Build and install without the numpy extra
+      run: pip install --verbose . pytest
+    - name: Check numpy is absent
+      run: python -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('numpy') is not None)"
+    - name: Test (numpy-specific tests are skipped)
+      run: pytest tests/
+
   build:
-    name: Install locally with pip
+    name: Install from source with pip
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         platform: [macos-latest, ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
     steps:
     - uses: actions/checkout@v6
+    - uses: dtolnay/rust-toolchain@stable
     - uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
-    - run: pip install --upgrade pip wheel
+    - run: pip install --upgrade pip
     - name: Build and install
       run: pip install --verbose ".[test]"
     - name: Test
