@@ -1,0 +1,19 @@
+"""Type stubs for the compiled Rust extension ``fast_tsp._core``."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
+
+# A sequence of integer sequences, or a 2D integer numpy array (read directly
+# without per-element conversion). numpy is optional, so it is typed loosely.
+_DistMatrix = Sequence[Sequence[int]] | Any
+
+__version__: str
+
+def find_tour(dists: _DistMatrix, duration_seconds: float = 2.0, max_threads: int | None = 1) -> list[int]: ...
+def is_valid_tour(n: int, tour: Sequence[int]) -> bool: ...
+def compute_cost(tour: Sequence[int], dists: _DistMatrix) -> int: ...
+def greedy_nearest_neighbor(dists: _DistMatrix) -> list[int]: ...
+def solve_tsp_exact(dists: _DistMatrix) -> list[int]: ...
+def score_tour(tour: Sequence[int], dists: _DistMatrix, opt_cost: int) -> float: ...

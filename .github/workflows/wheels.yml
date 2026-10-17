@@ -1,98 +1,224 @@
 name: Wheels
 
+# Builds prebuilt wheels so users never need a Rust toolchain, and publishes
+# them to PyPI when a GitHub release is published.
+#
+# Each platform gets three wheels:
+#   cp310-abi3         stable ABI: CPython 3.10-3.14 (and later GIL builds)
+#   cp314-cp314t       free-threaded CPython 3.14 (no stable ABI for it)
+#   cp315-abi3.abi3t   free-threaded stable ABI (PEP 803): CPython 3.15+,
+#                      both GIL and free-threaded builds
+#
+# Every build passes an explicit interpreter (-i). Without one, maturin picks
+# the newest Python it finds, and with 3.15 present that yields only the
+# 3.15+ wheel. The "Check wheel tags" step catches that.
+
 on:
   workflow_dispatch:
-  # pull_request:
-  # push:  # Disabled since it uses all my GitHub Actions time
-  #   branches:
-  #    - main
   release:
     types:
       - published
 
+permissions:
+  contents: read
+
 env:
-  CIBW_TEST_COMMAND: pytest {project}/tests
-  CIBW_TEST_EXTRAS: test
+  # Interpreters the wheels are tested on (uv python requests).
+  TEST_PYTHONS: "3.10 3.14+gil 3.14t 3.15+gil 3.15t"
 
 jobs:
-  build_sdist:
-    name: Build SDist
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: true
-    - name: Build SDist
-      run: pipx run build --sdist
-    - name: Check metadata
-      run: pipx run twine check dist/*
-    - uses: actions/upload-artifact@v6
-      with:
-        name: sdist
-        path: dist/*.tar.gz
-
-  build_wheels:
-    name: Wheels on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    if: github.event_name == 'release'
+  linux:
+    name: Linux ${{ matrix.platform.target }} (${{ matrix.platform.manylinux }})
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: ["macOS-latest", "ubuntu-latest", "windows-latest"]
+        platform:
+          - { runner: ubuntu-latest, target: x86_64, manylinux: "2_28" }
+          - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: "2_28" }
+          - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
+          - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
     steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: true
-    - uses: actions/setup-python@v6
-      with:
-        python-version: '3.x'
-    - name: Build and install
-      run: python -m pip install --verbose ".[test]"
-    - name: Remove CMake build directory (1/2)
-      uses: JesseTG/rm@v1.0.3
-      with:
-        path: ./build
-    - name: Remove CMake build directory (2/2)
-      uses: JesseTG/rm@v1.0.3
-      with:
-        path: ./_skbuild
-    - name: Install cibuildwheel
-      run: python -m pip install cibuildwheel==3.3.1
-    - name: Build wheels
-      run: python -m cibuildwheel --output-dir wheelhouse
-      env:
-        CIBW_PROJECT_REQUIRES_PYTHON: ">=3.10.0"
-        CIBW_BUILD: "cp3*"
-        CIBW_ARCHS_MACOS: "x86_64 universal2 arm64"
-        CIBW_ARCHS_LINUX: "auto64"
-        CIBW_ARCHS_WINDOWS: "x86 AMD64"
-        CIBW_TEST_SKIP: "*-macosx_arm64 *-macosx_universal2:arm64"
-    - name: Upload wheels
-      uses: actions/upload-artifact@v6
-      with:
-        name: wheels-${{ matrix.os }}
-        path: wheelhouse/*.whl
+      - uses: actions/checkout@v6
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist -i python3.12
+      - name: Build free-threaded 3.14 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist -i python3.14t
+      - name: Build abi3t wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --out dist -i python3.15
+      - name: Check wheel tags
+        shell: bash
+        run: .github/scripts/check-wheel-tags.sh dist
+      - uses: astral-sh/setup-uv@v7
+        if: matrix.platform.manylinux == '2_28'
+      - name: Test wheels (glibc)
+        if: matrix.platform.manylinux == '2_28'
+        run: |
+          # shellcheck disable=SC2086  # split the list into arguments
+          .github/scripts/test-wheels.sh dist $TEST_PYTHONS
+      - name: Test wheels (musl)
+        if: matrix.platform.manylinux != '2_28'
+        run: |
+          docker run --rm -v "$PWD:/io" -w /io alpine:latest sh -c '
+            set -e
+            apk add --no-cache bash curl
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+            .github/scripts/test-wheels.sh dist '"$TEST_PYTHONS"'
+          '
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-linux-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
+          path: dist/*.whl
+
+  windows:
+    name: Windows ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: windows-latest
+            target: x64
+            python_arch: x64
+            test_pythons: "3.10 3.14+gil 3.14t 3.15+gil 3.15t"
+          - runner: windows-latest
+            target: x86
+            python_arch: x86
+            # 32-bit interpreters on the 64-bit runner.
+            test_pythons: "cpython-3.10-windows-x86 cpython-3.15-windows-x86 cpython-3.15+freethreaded-windows-x86"
+          - runner: windows-11-arm
+            target: aarch64
+            python_arch: arm64
+            # No Python 3.10 builds or numpy wheels exist for Windows on ARM.
+            test_pythons: "3.11 3.14t 3.15+gil 3.15t"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.platform.python_arch }}
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.12
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+          architecture: ${{ matrix.platform.python_arch }}
+      - name: Build free-threaded 3.14 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.14t
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.15"
+          architecture: ${{ matrix.platform.python_arch }}
+      - name: Build abi3t wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.15
+      - name: Check wheel tags
+        shell: bash
+        run: .github/scripts/check-wheel-tags.sh dist
+      - uses: astral-sh/setup-uv@v7
+      - name: Test wheels
+        shell: bash
+        run: .github/scripts/test-wheels.sh dist ${{ matrix.platform.test_pythons }}
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-windows-${{ matrix.platform.target }}
+          path: dist/*.whl
+
+  macos:
+    name: macOS ${{ matrix.platform.target }}
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { runner: macos-15-intel, target: x86_64 }
+          - { runner: macos-latest, target: aarch64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.12
+            3.14t
+            3.15
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.12
+      - name: Build free-threaded 3.14 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.14t
+      - name: Build abi3t wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist -i python3.15
+      - name: Check wheel tags
+        run: .github/scripts/check-wheel-tags.sh dist
+      - uses: astral-sh/setup-uv@v7
+      - name: Test wheels
+        run: |
+          # shellcheck disable=SC2086  # split the list into arguments
+          .github/scripts/test-wheels.sh dist $TEST_PYTHONS
+      - uses: actions/upload-artifact@v6
+        with:
+          name: wheels-macos-${{ matrix.platform.target }}
+          path: dist/*.whl
+
+  sdist:
+    name: Build SDist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - name: Check metadata
+        run: pipx run twine check dist/*
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sdist
+          path: dist/*.tar.gz
 
   upload_all:
     name: Upload if release
-    needs: [build_wheels, build_sdist]
+    needs: [linux, windows, macos, sdist]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     steps:
-    - uses: actions/setup-python@v6
-      with:
-        python-version: "3.x"
-    - uses: actions/download-artifact@v7
-      with:
-        path: dist
-    - name: Flatten distribution files
-      run: |
-        mkdir -p dist_flat
-        find dist -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec mv {} dist_flat/ \;
-        rm -rf dist
-        mv dist_flat dist
-    - uses: pypa/gh-action-pypi-publish@release/v1
-      with:
-        user: __token__
-        password: ${{ secrets.PYPI_API_TOKEN }}
-        attestations: false
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -l dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          attestations: false

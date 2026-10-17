@@ -15,6 +15,8 @@
 ci:
   autoupdate_commit_msg: "chore: update pre-commit hooks"
   autofix_commit_msg: "style: pre-commit fixes"
+  # pre-commit.ci has no Rust toolchain. The Pip workflow runs `cargo fmt --check`.
+  skip: [cargo-fmt]
 
 repos:
 - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -41,17 +43,11 @@ repos:
   - id: ruff-format
     args: [--check]
 
-# CMake formatting
-- repo: https://github.com/cheshirekow/cmake-format-precommit
-  rev: v0.6.13
+# Rust formatting
+- repo: local
   hooks:
-  - id: cmake-format
-    additional_dependencies: [pyyaml]
-    types: [file]
-    files: (\.cmake|CMakeLists.txt)(.in)?$
-
-# Suggested hook if you add a .clang-format file
-# - repo: https://github.com/pre-commit/mirrors-clang-format
-#  rev: v13.0.0
-#  hooks:
-#  - id: clang-format
+  - id: cargo-fmt
+    name: cargo fmt
+    entry: cargo fmt --
+    language: system
+    types: [rust]

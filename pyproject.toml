@@ -1,12 +1,48 @@
 [build-system]
-build-backend = "setuptools.build_meta"
-requires = [
-    "setuptools>=42.0.0",
-    "pybind11>=2.9.2",
-    "cmake>=3.22",
-    "scikit-build>=0.14.1",
-    "numpy>=1.0.0",
+# 1.14+ is needed to build abi3t (free-threaded stable ABI) wheels for 3.15+.
+requires = ["maturin>=1.14,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fast_tsp"
+description = "A fast TSP solver with Python bindings"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Soeren Mulvad", email = "shmulvad@gmail.com" }]
+requires-python = ">=3.10"
+dependencies = []
+dynamic = ["version"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Free Threading :: 3 - Stable",
+    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
 ]
+
+[project.optional-dependencies]
+# Optional: fast_tsp accepts plain lists, and reads integer numpy arrays
+# directly when numpy is installed.
+numpy = ["numpy>=1.0.0"]
+test = ["pytest", "numpy"]
+docs = ["sphinx", "sphinx-rtd-theme", "sphinx-autodoc-typehints"]
+
+[project.urls]
+Homepage = "https://github.com/shmulvad/fast-tsp"
+Documentation = "https://fast-tsp.readthedocs.io"
+
+[tool.maturin]
+# Version comes from Cargo.toml. The Python package lives in python/fast_tsp
+# and the compiled extension is installed as fast_tsp._core.
+python-source = "python"
+module-name = "fast_tsp._core"
+features = ["python", "numpy"]
 
 [tool.ruff]
 preview = true

@@ -16,13 +16,13 @@ repository-code: 'https://github.com/shmulvad/fast-tsp'
 abstract: >-
   A library for computing near optimal solution to large
   instances of the TSP (Travelling Salesman Problem) fast
-  using a local solver. The library is written in C++ and
+  using a local solver. The library is written in Rust and
   provides Python bindings.
 keywords:
   - TSP
   - Travelling Salesman Problem
   - Local solver
-  - C++
+  - Rust
   - Python
 license: MIT
 date-released: '2022-07-28'

@@ -1,0 +1,30 @@
+[package]
+name = "fast_tsp"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A fast TSP solver with Python bindings"
+license = "MIT"
+repository = "https://github.com/shmulvad/fast-tsp"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fastrand = "2.3"
+pyo3 = { version = "0.30", features = ["abi3-py310", "abi3t-py315"], optional = true }
+numpy = { version = "0.30", optional = true }
+
+[features]
+# Python bindings. Enabled by maturin (see pyproject.toml); off for plain `cargo test`.
+python = ["dep:pyo3"]
+# Read numpy arrays directly instead of element by element. numpy is only
+# touched at runtime when the input actually is an ndarray.
+numpy = ["python", "dep:numpy"]
+
+[profile.release]
+lto = true
+codegen-units = 1
