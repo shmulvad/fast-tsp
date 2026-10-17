@@ -1,7 +1,8 @@
 name: Wheels
 
 # Builds prebuilt wheels so users never need a Rust toolchain, and publishes
-# them to PyPI when a GitHub release is published.
+# them to PyPI when a tag is pushed. Manual runs build and test every wheel as
+# a dry run without publishing.
 #
 # Each platform gets three wheels:
 #   cp310-abi3         stable ABI: CPython 3.10-3.14 (and later GIL builds)
@@ -16,10 +17,10 @@ name: Wheels
 # 3.15+ wheel. The "Check wheel tags" step catches that.
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
-  release:
-    types:
-      - published
 
 permissions:
   contents: read
@@ -32,6 +33,7 @@ jobs:
   linux:
     name: Linux ${{ matrix.platform.target }} (${{ matrix.platform.manylinux }})
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -88,6 +90,7 @@ jobs:
   windows:
     name: Windows ${{ matrix.platform.target }}
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +157,7 @@ jobs:
   macos:
     name: macOS ${{ matrix.platform.target }}
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -198,6 +202,7 @@ jobs:
   sdist:
     name: Build SDist
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - name: Build sdist
@@ -212,19 +217,21 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  upload_all:
-    name: Upload if release
+  publish:
+    name: Publish to PyPI
     needs: [linux, windows, macos, sdist]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    timeout-minutes: 10
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
       - run: ls -l dist
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          attestations: false
+      - uses: astral-sh/setup-uv@v7
+      # --check-url skips files already on PyPI, so a failed run can be re-run.
+      - name: Publish
+        run: uv publish --check-url https://pypi.org/simple/ dist/*
+        env:
+          UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
