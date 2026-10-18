@@ -38,6 +38,7 @@ Options:
   --repeats <k>          Runs per case per configuration [default: 1]
   --filter <text>        Only run cases whose file name contains <text>
   --scale-to <N>         Also report the total scaled to N cases [default: 50]
+  --seed <s>             Seed the search; repeat r uses seed s + r [default: entropy]
   --quiet                Only print the summaries
   -h, --help             Show this help";
 
@@ -75,6 +76,7 @@ struct Args {
     repeats: usize,
     filter: Option<String>,
     scale_to: f64,
+    seed: Option<u64>,
     quiet: bool,
 }
 
@@ -187,15 +189,24 @@ fn solver_matrix(points: &[Point], scale: Option<f64>) -> tsp::Result<DistMatrix
     DistMatrix::from_flat(n, data)
 }
 
-fn solve(case: &Case, start: Instant, secs: f64, threads: usize) -> tsp::Result<Tour> {
+fn solve(
+    case: &Case,
+    start: Instant,
+    secs: f64,
+    threads: usize,
+    seed: Option<u64>,
+) -> tsp::Result<Tour> {
     let dists = solver_matrix(&case.points, case.scale)?;
     let budget = Budget::new(start, secs)?;
-    tsp::find_tour(&dists, &budget, threads)
+    match seed {
+        Some(seed) => tsp::find_tour_seeded(&dists, &budget, threads, seed),
+        None => tsp::find_tour(&dists, &budget, threads),
+    }
 }
 
-fn run_case(case: &Case, secs: f64, threads: usize) -> RunResult {
+fn run_case(case: &Case, secs: f64, threads: usize, seed: Option<u64>) -> RunResult {
     let start = Instant::now();
-    let result = solve(case, start, secs, threads);
+    let result = solve(case, start, secs, threads, seed);
     let elapsed = start.elapsed().as_secs_f64();
     let failed = |error: String| RunResult {
         score: 0.0,
@@ -250,7 +261,7 @@ fn run_config(cases: &[Case], args: &Args, secs: f64, threads: usize) -> Summary
     let mut failed_runs = 0;
     for case in cases {
         let runs: Vec<RunResult> = (0..args.repeats)
-            .map(|_| run_case(case, secs, threads))
+            .map(|r| run_case(case, secs, threads, args.seed.map(|s| s + r as u64)))
             .collect();
         for (total, run) in totals.iter_mut().zip(&runs) {
             *total += run.score;
@@ -348,6 +359,7 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
         repeats: 1,
         filter: None,
         scale_to: 50.0,
+        seed: None,
         quiet: false,
     };
     let mut raw = raw.into_iter();
@@ -374,6 +386,7 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--repeats" => args.repeats = parse_list(&flag, &value)?[0],
             "--filter" => args.filter = Some(value),
             "--scale-to" => args.scale_to = parse_list(&flag, &value)?[0],
+            "--seed" => args.seed = Some(parse_list(&flag, &value)?[0]),
             _ => return Err(format!("Unknown option {flag}\n\n{USAGE}")),
         }
     }
@@ -471,13 +484,13 @@ mod tests {
     #[test]
     fn scores_runs() {
         let case = parse_case("sample", "14 18\n4\n0 0\n3 0\n3 4\n0 4\n").unwrap();
-        let run = run_case(&case, 0.1, 1);
+        let run = run_case(&case, 0.1, 1, Some(1));
         assert!(run.error.is_none());
         assert_eq!(run.cost, Some(14));
         assert_eq!(run.score, 1.0);
         // An opt above the real optimum is reported, not a crash.
         let bad = parse_case("bad", "15 18\n4\n0 0\n3 0\n3 4\n0 4\n").unwrap();
-        let run = run_case(&bad, 0.1, 1);
+        let run = run_case(&bad, 0.1, 1, None);
         assert_eq!(run.score, 0.0);
         assert!(run.error.is_some());
     }
@@ -499,6 +512,7 @@ mod tests {
                 "--threads=1,4",
                 "--repeats",
                 "3",
+                "--seed=7",
                 "--quiet",
             ]
             .map(String::from),
@@ -507,6 +521,7 @@ mod tests {
         assert_eq!(args.times, vec![0.1, 2.0]);
         assert_eq!(args.threads, vec![1, 4]);
         assert_eq!(args.repeats, 3);
+        assert_eq!(args.seed, Some(7));
         assert!(args.quiet);
         assert!(parse_args(["--time", "0"].map(String::from)).is_err());
         assert!(parse_args(["--threads", "0"].map(String::from)).is_err());

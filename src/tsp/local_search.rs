@@ -155,7 +155,13 @@ const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 /// budget's interrupt callback (which may need the calling thread, e.g. to
 /// handle Ctrl-C in Python), and tells the other threads to stop through a
 /// shared flag.
-pub(crate) fn local_search(dists: &DistMatrix, budget: &Budget<'_>, threads: usize) -> Tour {
+pub(crate) fn local_search(
+    dists: &DistMatrix,
+    budget: &Budget<'_>,
+    threads: usize,
+    seed: Option<u64>,
+) -> Tour {
+    let mut rng = seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed);
     let nn = Neighbours::new(dists, budget);
     let start: Vec<Node> = greedy_nearest_neighbor(dists)
         .expect("n >= 2 is checked by the caller")
@@ -165,11 +171,10 @@ pub(crate) fn local_search(dists: &DistMatrix, budget: &Budget<'_>, threads: usi
     let shared = SharedBest::new(cost(dists, &start), start);
 
     if threads <= 1 {
-        search(dists, &nn, &shared, budget, &mut fastrand::Rng::new());
+        search(dists, &nn, &shared, budget, &mut rng);
     } else {
         let stop = AtomicBool::new(false);
         let deadline = budget.deadline();
-        let mut rng = fastrand::Rng::new();
         thread::scope(|scope| {
             let workers: Vec<_> = (1..threads)
                 .map(|_| {
