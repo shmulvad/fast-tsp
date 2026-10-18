@@ -53,6 +53,16 @@ $ uv run pytest tests/
 $ cargo test                    # Rust unit tests
 ```
 
+### Benchmarking
+
+`examples/bench.rs` runs the solver on every instance in `cases/` and scores each tour as on [Kattis](https://open.kattis.com/problems/tsp): `0.02^((cost - opt) / (naive - opt))`, where `naive` is the greedy nearest-neighbour cost. `cases/` holds the TSPLIB instances that use Euclidean distance (`EUC_2D`) with fewer than 5000 nodes, plus three random 19-node instances. The seven larger TSPLIB instances are in `cases/large/` and run with `--cases cases/large` (about 1.6 GB of memory for the largest). A comma list for `--time` or `--threads` runs a sweep over those values:
+
+```sh
+$ cargo run --release --example bench -- --time 2
+$ cargo run --release --example bench -- --time 0.1,2,10 --threads 1,4 --repeats 3 --quiet
+$ cargo run --release --example bench -- --help
+```
+
 ### Citation
 
 If you find that this project helps your research, please consider citing it using the metadata from the `CITATION.cff` file.
