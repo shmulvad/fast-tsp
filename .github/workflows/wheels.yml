@@ -82,7 +82,7 @@ jobs:
             export PATH="$HOME/.local/bin:$PATH"
             .github/scripts/test-wheels.sh dist '"$TEST_PYTHONS"'
           '
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-${{ matrix.platform.target }}-${{ matrix.platform.manylinux }}
           path: dist/*.whl
@@ -149,7 +149,7 @@ jobs:
       - name: Test wheels
         shell: bash
         run: .github/scripts/test-wheels.sh dist ${{ matrix.platform.test_pythons }}
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-windows-${{ matrix.platform.target }}
           path: dist/*.whl
@@ -194,7 +194,7 @@ jobs:
         run: |
           # shellcheck disable=SC2086  # split the list into arguments
           .github/scripts/test-wheels.sh dist $TEST_PYTHONS
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist/*.whl
@@ -212,7 +212,7 @@ jobs:
           args: --out dist
       - name: Check metadata
         run: pipx run twine check dist/*
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
