@@ -1,6 +1,7 @@
 //! Pure-Rust TSP solver core. Has no Python dependencies so it can be unit
 //! tested with plain `cargo test`.
 
+mod candidates;
 mod exact;
 mod greedy;
 mod local_search;

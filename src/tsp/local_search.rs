@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
+use super::candidates::nearest;
 use super::{Budget, DistMatrix, Tour, greedy_nearest_neighbor};
 
 /// How many nearest neighbours each node considers in 2-opt and 3-opt.
@@ -72,31 +73,18 @@ impl Neighbours {
     /// O(n^2). If the budget is interrupted while building, the lists are
     /// left empty; the search loop will not run in that case anyway.
     fn new(dists: &DistMatrix, budget: &Budget<'_>) -> Self {
-        let n = dists.len();
-        let k = NEIGH_LIMIT.min(n.saturating_sub(1));
-        let mut data = Vec::with_capacity(n * k);
-        let mut row: Vec<(i64, Node)> = Vec::with_capacity(n);
-        for i in 0..n {
-            if i % 64 == 0 && budget.is_interrupted() {
-                return Self {
-                    k: 0,
-                    data: Vec::new(),
-                };
-            }
-            row.clear();
-            row.extend(
-                (0..n)
-                    .filter(|&j| j != i)
-                    .map(|j| (dists.get(i, j), j as Node)),
-            );
-            if k < row.len() {
-                row.select_nth_unstable(k);
-                row.truncate(k);
-            }
-            row.sort_unstable();
-            data.extend(row.iter().map(|&(_, j)| j));
+        let k = NEIGH_LIMIT.min(dists.len().saturating_sub(1));
+        match nearest(dists, k, budget) {
+            Some(data) => Self { k, data },
+            None => Self::empty(),
         }
-        Self { k, data }
+    }
+
+    fn empty() -> Self {
+        Self {
+            k: 0,
+            data: Vec::new(),
+        }
     }
 
     #[inline(always)]
