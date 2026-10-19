@@ -2,6 +2,7 @@
 //! confined to a short window, now and then a global one) followed by a
 //! Lin-Kernighan + 2-opt/3-opt descent around the perturbed nodes, keeping
 //! the best tour and walking from any tour within a small slack of it.
+//! A walk that stops improving restarts from a perturbed best tour.
 //! Every step costs time proportional to the work it causes, not to the
 //! tour length.
 
@@ -69,13 +70,33 @@ const KICK_SEGMENT_MAX: usize = 200;
 const ACCEPT_SLACK_PER_EDGE: f64 = 0.1;
 /// A search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
 /// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour.
-/// Larger instances are bound by the time limit. With LK in the descent a
-/// kick does about 10x the work of a 2-opt/3-opt kick, so 100 kicks per
-/// node is about the work 1000 were before. On the 44 cases with n <= 442,
-/// 30, 100, 300 and 1000 per node all find the optimum at 2 s (1 and 4
-/// threads); 100 uses 30-36 s of the 88 s budget, 1000 uses 76 s.
-const KICKS_PER_NODE: usize = 100;
-const MIN_KICKS_WITHOUT_IMPROVEMENT: u32 = 20_000;
+/// Larger instances are bound by the time limit. Before walk restarts (see
+/// `RESTART_KICKS_PER_NODE`) this was 100 per node / 20 000, which ended
+/// runs whose walk was trapped (d1291 after 9 s of a 10 s budget, d1655 and
+/// pr1002 after ~12 s). With restarts the search keeps finding better tours
+/// long after that, so the rule is only a ceiling for long or unlimited
+/// budgets: at least 33 restarts in a row (about 170 for n > 1000) that all
+/// failed to improve. At 10 s, inputs with n < 200 now return after 1-4 s
+/// (was 0.3-0.8 s), always with the same (optimal) tours.
+const KICKS_PER_NODE: usize = 500;
+const MIN_KICKS_WITHOUT_IMPROVEMENT: u32 = 100_000;
+/// Walk restarts. The record-to-record walk settles in one basin within a
+/// second or two and cannot leave it with its small slack (d1291, fl1577,
+/// d1655, pr1002 stopped improving after 1-2 s of a 10 s budget; growing
+/// the slack up to a whole mean edge while stuck did not get them out). After
+/// `max(MIN_KICKS_PER_RESTART, RESTART_KICKS_PER_NODE * n)` kicks in a row
+/// that did not improve the walk's own record, the thread restarts the walk
+/// from its best tour perturbed by `RESTART_PERTURBATION` segment double
+/// bridges (each up to `3 * KICK_SEGMENT_MAX` nodes at a random place) and
+/// a descent. The new walk is judged against its own record, so it can
+/// settle in a different basin before it has to beat the best tour.
+/// Restarting every 3 n non-improving kicks with 32 bridges was best among
+/// 2-10 n and 8-64 bridges (10 s, d1291 d1655 d2103 fl1577 pr1002 rl1889
+/// u1817 u2152, 2 seeds: 7.65 -> 7.97 of 8). At 0.2 s restarts are rare on
+/// inputs with n >= 500, which make about `MIN_KICKS_PER_RESTART` kicks.
+const RESTART_KICKS_PER_NODE: usize = 3;
+const MIN_KICKS_PER_RESTART: u32 = 3_000;
+const RESTART_PERTURBATION: u32 = 32;
 /// Maximum number of flips in one Lin-Kernighan step.
 const LK_MAX_DEPTH: usize = 25;
 /// How many choices of `t3` an LK step tries at its first levels before
@@ -259,9 +280,11 @@ pub(crate) fn local_search(
 
 /// One search thread: perturb the current tour, re-optimise it locally,
 /// and continue from the result if it is within the acceptance slack of the
-/// best tour (see `ACCEPT_SLACK_PER_EDGE`). Stops when the budget is
-/// exceeded or after `max_kicks_without_improvement(n)` perturbations in a
-/// row that did not lead to a better tour (found by this thread or any other).
+/// walk's record (see `ACCEPT_SLACK_PER_EDGE`), restarting the walk from a
+/// perturbed best tour when it stagnates (see `RESTART_KICKS_PER_NODE`).
+/// Stops when the budget is exceeded or after
+/// `max_kicks_without_improvement(n)` perturbations in a row that did not
+/// lead to a better tour (found by this thread or any other).
 ///
 /// The cost is tracked incrementally (kick delta minus move gains), and a
 /// rejected kick is rolled back through the undo journal, so a kick costs
@@ -309,6 +332,12 @@ fn search_with_slack(
 
     let max_fails = max_kicks_without_improvement(n);
     let mut num_iter_no_improvement = 0;
+    // The walk's own record and the kicks since it last improved, for the
+    // restarts (see `RESTART_KICKS_PER_NODE`). Until the first restart the
+    // record is the best tour.
+    let restart_after = kicks_per_restart(n);
+    let mut walk_best = best_cost;
+    let mut walk_fails = 0;
     while !budget.is_exceeded() && num_iter_no_improvement < max_fails {
         if shared.cost() < best_cost {
             // Another thread found a better tour: continue from it.
@@ -317,6 +346,22 @@ fn search_with_slack(
             opt.reset_positions();
             cur_cost = best_cost;
             num_iter_no_improvement = 0;
+            walk_best = best_cost;
+            walk_fails = 0;
+        }
+
+        if walk_fails >= restart_after {
+            cur_cost = opt.restart_from(&best_tour, best_cost, budget, rng);
+            walk_best = cur_cost;
+            walk_fails = 0;
+            if cur_cost < best_cost {
+                debug_assert_eq!(cur_cost, self::cost(dists, &opt.tour));
+                num_iter_no_improvement = 0;
+                shared.offer(cur_cost, &opt.tour);
+                best_tour.clone_from(&opt.tour);
+                best_cost = cur_cost;
+            }
+            continue;
         }
 
         // Mostly local kicks. An occasional global one reconnects distant
@@ -336,22 +381,36 @@ fn search_with_slack(
             shared.offer(cost, &opt.tour);
             best_tour.clone_from(&opt.tour);
             best_cost = cost;
+        } else {
+            // Only a strictly better tour resets the counter; otherwise the
+            // walk (and its restarts) could keep the search alive forever.
+            num_iter_no_improvement += 1;
+        }
+        if cost < walk_best {
+            walk_best = cost;
+            walk_fails = 0;
+        } else {
+            walk_fails += 1;
+        }
+        // Record-to-record acceptance against the walk's record, which is
+        // the best tour except after a restart.
+        if cost <= walk_best + slack {
+            debug_assert_eq!(cost, self::cost(dists, &opt.tour));
             cur_cost = cost;
             opt.journal.clear();
         } else {
-            // Only a strictly better tour resets the counter; otherwise the
-            // walk could keep the search alive forever.
-            num_iter_no_improvement += 1;
-            if cost <= best_cost + slack {
-                debug_assert_eq!(cost, self::cost(dists, &opt.tour));
-                cur_cost = cost;
-                opt.journal.clear();
-            } else {
-                opt.undo();
-            }
+            opt.undo();
         }
     }
     cur_cost
+}
+
+/// How many kicks in a row without improving the walk's own record make a
+/// search thread restart its walk (see `RESTART_KICKS_PER_NODE`).
+fn kicks_per_restart(n: usize) -> u32 {
+    u32::try_from(n.saturating_mul(RESTART_KICKS_PER_NODE))
+        .unwrap_or(u32::MAX)
+        .max(MIN_KICKS_PER_RESTART)
 }
 
 /// How many kicks in a row without a strictly better tour end a search
@@ -1005,6 +1064,29 @@ impl<'a> Opt<'a> {
         delta
     }
 
+    /// Replaces the tour with `tour` (of cost `cost`), applies
+    /// `RESTART_PERTURBATION` local kicks and a descent, and returns the
+    /// new cost. The result is the new accepted tour (the journal is empty).
+    fn restart_from(
+        &mut self,
+        tour: &[Node],
+        cost: i64,
+        budget: &Budget<'_>,
+        rng: &mut fastrand::Rng,
+    ) -> i64 {
+        self.clear_queue();
+        self.tour.clear();
+        self.tour.extend_from_slice(tour);
+        self.reset_positions();
+        let mut cost = cost;
+        for _ in 0..RESTART_PERTURBATION {
+            cost += self.kick(KICK, cost, rng);
+        }
+        cost -= self.descend(budget);
+        self.journal.clear();
+        cost
+    }
+
     /// Swaps tour positions `i` and `j` and updates positions.
     fn swap_raw(&mut self, i: usize, j: usize) {
         self.tour.swap(i, j);
@@ -1232,6 +1314,49 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn restart_tracks_cost_and_leaves_the_start_tour() {
+        let mut rng = fastrand::Rng::with_seed(8);
+        for n in [5, 9, 40, 700] {
+            let d = euclidean(n, n as u64);
+            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let mut opt = Opt::new(&d, &nn, nodes(n));
+            opt.activate_all();
+            opt.descend(&Budget::unlimited());
+            opt.journal.clear();
+            let best = opt.tour.clone();
+            let best_cost = cost(&d, &best);
+            // Start from some other tour, as a walk would be.
+            let other_cost = opt.restart_from(
+                &nodes(n),
+                cost(&d, &nodes(n)),
+                &Budget::unlimited(),
+                &mut rng,
+            );
+            assert_eq!(other_cost, cost(&d, &opt.tour));
+            let mut moved = false;
+            for _ in 0..5 {
+                let c = opt.restart_from(&best, best_cost, &Budget::unlimited(), &mut rng);
+                assert!(is_valid(&opt.tour));
+                assert!(positions_match(&opt.tour, &opt.position));
+                assert!(opt.journal.is_empty() && opt.queue.is_empty());
+                assert_eq!(c, cost(&d, &opt.tour));
+                moved |= !same_cycle(&opt.tour, &best);
+            }
+            // The perturbation must actually move the walk somewhere else.
+            assert!(n < 40 || moved, "n={n}");
+        }
+    }
+
+    #[test]
+    fn restarts_come_well_before_the_stop_rule() {
+        for n in [1, 20, 500, 1000, 5000, 20_000] {
+            assert!(kicks_per_restart(n) >= MIN_KICKS_PER_RESTART);
+            // At least 20 restarts in a row must fail before a thread stops.
+            assert!(20 * kicks_per_restart(n) <= max_kicks_without_improvement(n));
         }
     }
 
