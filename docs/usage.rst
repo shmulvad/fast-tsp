@@ -52,7 +52,7 @@ matrix for various distance functions using `pairwise_distances`.
     #  [23, 32],
     #  [57,  6]]
 
-    dists = pairwise_distances(coords).astype(np.int64)
+    dists = np.rint(pairwise_distances(coords)).astype(np.int64)
     print(dists[:3, :3])
     # [[ 0, 58, 35],
     #  [58,  0, 42],
@@ -76,6 +76,24 @@ The tour is a list of indices that correspond to the order of the nodes in the
 supplied distance matrix. E.g. [0, 52, 1] would imply that the tour starts at
 index 0, goes to the node at index 52, goes to node 1, and finally ends at node
 0 again, closing the tour.
+
+
+Choosing the time budget
+#########################
+
+:pyt:`duration_seconds` (default 2.0) is a wall-clock budget for the whole
+call, including setup. The solver returns earlier when its search has
+converged, which is usual for small problems, so a generous budget costs
+nothing on easy inputs. As a rule of thumb from the TSPLIB instances (see
+:doc:`comparisons`): a few hundred nodes are solved to optimality or very
+close to it within 0.2 seconds, a few thousand nodes are within about 1 % of
+the optimum after 0.2 seconds and within a few tenths of a percent after
+10 seconds. Larger budgets keep improving the tour slowly. Pressing Ctrl-C
+stops the search and raises :pyt:`KeyboardInterrupt`.
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=0.5)
 
 
 Using multiple cores
@@ -112,7 +130,7 @@ the following requirements:
 * The distance matrix should be less than 2^16 - 1 (the maximum value for an unsigned 16-bit integer).
 
 You can check whether your distance matrix fulfills these requirements by using
-the :pyt:`is_valid_distance_matrix` function. If you are still getting errors,
+the :pyt:`is_valid_dist_matrix` function. If you are still getting errors,
 please open an issue on the `GitHub page <https://github.com/shmulvad/fast-tsp>`.
 
 
@@ -151,13 +169,14 @@ use this to get an idea of the quality of the returned solution:
     tour = fast_tsp.find_tour(dists)  # Assume `dists` are defined
     cost_solver = fast_tsp.compute_cost(tour, dists)
     print(cost_solver)  # 5984
-    cost_greedy = fast_tsp.greedy_nearest_neighbor(dists)
+    cost_greedy = fast_tsp.compute_cost(fast_tsp.greedy_nearest_neighbor(dists), dists)
     print(cost_greedy)  # 6812
 
 
 It can be interesting to know how well a solution performs, taking into account
 the greedy solution and the optimal cost. If you know what the optimal cost is,
-you can use :pyt:`score`-function to get a score for your solution.
+you can use the :pyt:`score_tour` function to get a score for your solution
+(see Validation below).
 
 
 
