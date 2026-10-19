@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{env, fs, process};
 
-use _core::tsp::{self, Budget, DistMatrix, Tour};
+use _core::tsp::{self, Budget, Candidates, DistMatrix, SearchOptions, Tour};
 
 const USAGE: &str = "\
 Usage: cargo run --release --example bench -- [options]
@@ -39,6 +39,9 @@ Options:
   --filter <text>        Only run cases whose file name contains <text>
   --scale-to <N>         Also report the total scaled to N cases [default: 50]
   --seed <s>             Seed the search; repeat r uses seed s + r [default: entropy]
+  --candidates <c[,c..]> auto, nearest or alpha; a list sweeps [default: auto]
+  --stop-early           Let the search return before the deadline once it
+                         has converged (stop_when_converged)
   --quiet                Only print the summaries
   -h, --help             Show this help";
 
@@ -77,6 +80,8 @@ struct Args {
     filter: Option<String>,
     scale_to: f64,
     seed: Option<u64>,
+    candidates: Vec<Candidates>,
+    stop_early: bool,
     quiet: bool,
 }
 
@@ -84,6 +89,7 @@ struct Args {
 struct Summary {
     secs: f64,
     threads: usize,
+    candidates: Candidates,
     total: f64,
     total_std: f64,
 }
@@ -195,18 +201,22 @@ fn solve(
     secs: f64,
     threads: usize,
     seed: Option<u64>,
+    options: &SearchOptions,
 ) -> tsp::Result<Tour> {
     let dists = solver_matrix(&case.points, case.scale)?;
     let budget = Budget::new(start, secs)?;
-    match seed {
-        Some(seed) => tsp::find_tour_seeded(&dists, &budget, threads, seed),
-        None => tsp::find_tour(&dists, &budget, threads),
-    }
+    tsp::find_tour_with(&dists, &budget, threads, seed, options)
 }
 
-fn run_case(case: &Case, secs: f64, threads: usize, seed: Option<u64>) -> RunResult {
+fn run_case(
+    case: &Case,
+    secs: f64,
+    threads: usize,
+    seed: Option<u64>,
+    options: &SearchOptions,
+) -> RunResult {
     let start = Instant::now();
-    let result = solve(case, start, secs, threads, seed);
+    let result = solve(case, start, secs, threads, seed, options);
     let elapsed = start.elapsed().as_secs_f64();
     let failed = |error: String| RunResult {
         score: 0.0,
@@ -248,12 +258,22 @@ fn is_late(elapsed: f64, secs: f64) -> bool {
     elapsed > secs * (1.0 + LATE_TOLERANCE)
 }
 
-fn run_config(cases: &[Case], args: &Args, secs: f64, threads: usize) -> Summary {
+fn run_config(
+    cases: &[Case],
+    args: &Args,
+    secs: f64,
+    threads: usize,
+    candidates: Candidates,
+) -> Summary {
     println!(
-        "\n== time {secs}s, threads {threads}, {} cases x {} repeats ==",
+        "\n== time {secs}s, threads {threads}, candidates {candidates}, {} cases x {} repeats ==",
         cases.len(),
         args.repeats
     );
+    let options = SearchOptions {
+        candidates,
+        stop_when_converged: args.stop_early,
+    };
     // totals[r] is the summed score of repeat r.
     let mut totals = vec![0.0; args.repeats];
     let mut slowest = (0.0, "");
@@ -261,7 +281,15 @@ fn run_config(cases: &[Case], args: &Args, secs: f64, threads: usize) -> Summary
     let mut failed_runs = 0;
     for case in cases {
         let runs: Vec<RunResult> = (0..args.repeats)
-            .map(|r| run_case(case, secs, threads, args.seed.map(|s| s + r as u64)))
+            .map(|r| {
+                run_case(
+                    case,
+                    secs,
+                    threads,
+                    args.seed.map(|s| s + r as u64),
+                    &options,
+                )
+            })
             .collect();
         for (total, run) in totals.iter_mut().zip(&runs) {
             *total += run.score;
@@ -335,6 +363,7 @@ fn run_config(cases: &[Case], args: &Args, secs: f64, threads: usize) -> Summary
     Summary {
         secs,
         threads,
+        candidates,
         total,
         total_std,
     }
@@ -360,6 +389,8 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
         filter: None,
         scale_to: 50.0,
         seed: None,
+        candidates: vec![Candidates::Auto],
+        stop_early: false,
         quiet: false,
     };
     let mut raw = raw.into_iter();
@@ -372,6 +403,10 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "-h" | "--help" => return Err(USAGE.to_string()),
             "--quiet" => {
                 args.quiet = true;
+                continue;
+            }
+            "--stop-early" => {
+                args.stop_early = true;
                 continue;
             }
             _ => {}
@@ -387,6 +422,7 @@ fn parse_args(raw: impl IntoIterator<Item = String>) -> Result<Args, String> {
             "--filter" => args.filter = Some(value),
             "--scale-to" => args.scale_to = parse_list(&flag, &value)?[0],
             "--seed" => args.seed = Some(parse_list(&flag, &value)?[0]),
+            "--candidates" => args.candidates = parse_list(&flag, &value)?,
             _ => return Err(format!("Unknown option {flag}\n\n{USAGE}")),
         }
     }
@@ -418,7 +454,9 @@ fn main() {
     let mut summaries = Vec::new();
     for &secs in &args.times {
         for &threads in &args.threads {
-            summaries.push(run_config(&cases, &args, secs, threads));
+            for &candidates in &args.candidates {
+                summaries.push(run_config(&cases, &args, secs, threads, candidates));
+            }
         }
     }
 
@@ -428,15 +466,16 @@ fn main() {
     }
     println!("\n== sweep ({} cases) ==", cases.len());
     println!(
-        "{:>8} {:>8} {:>9} {:>8} {:>9}",
-        "time(s)", "threads", "total", "±std", "scaled"
+        "{:>8} {:>8} {:>10} {:>9} {:>8} {:>9}",
+        "time(s)", "threads", "candidates", "total", "±std", "scaled"
     );
     let n = cases.len() as f64;
     for s in &summaries {
         println!(
-            "{:>8} {:>8} {:>9.3} {:>8.3} {:>9.2}",
+            "{:>8} {:>8} {:>10} {:>9.3} {:>8.3} {:>9.2}",
             s.secs,
             s.threads,
+            s.candidates,
             s.total,
             s.total_std,
             s.total * args.scale_to / n
@@ -484,13 +523,13 @@ mod tests {
     #[test]
     fn scores_runs() {
         let case = parse_case("sample", "14 18\n4\n0 0\n3 0\n3 4\n0 4\n").unwrap();
-        let run = run_case(&case, 0.1, 1, Some(1));
+        let run = run_case(&case, 0.1, 1, Some(1), &SearchOptions::default());
         assert!(run.error.is_none());
         assert_eq!(run.cost, Some(14));
         assert_eq!(run.score, 1.0);
         // An opt above the real optimum is reported, not a crash.
         let bad = parse_case("bad", "15 18\n4\n0 0\n3 0\n3 4\n0 4\n").unwrap();
-        let run = run_case(&bad, 0.1, 1, None);
+        let run = run_case(&bad, 0.1, 1, None, &SearchOptions::default());
         assert_eq!(run.score, 0.0);
         assert!(run.error.is_some());
     }
@@ -513,6 +552,8 @@ mod tests {
                 "--repeats",
                 "3",
                 "--seed=7",
+                "--candidates=nearest,alpha",
+                "--stop-early",
                 "--quiet",
             ]
             .map(String::from),
@@ -522,7 +563,13 @@ mod tests {
         assert_eq!(args.threads, vec![1, 4]);
         assert_eq!(args.repeats, 3);
         assert_eq!(args.seed, Some(7));
+        assert_eq!(
+            args.candidates,
+            vec![Candidates::Nearest, Candidates::Alpha]
+        );
+        assert!(args.stop_early);
         assert!(args.quiet);
+        assert!(parse_args(["--candidates", "best"].map(String::from)).is_err());
         assert!(parse_args(["--time", "0"].map(String::from)).is_err());
         assert!(parse_args(["--threads", "0"].map(String::from)).is_err());
         assert!(parse_args(["--nope", "1"].map(String::from)).is_err());

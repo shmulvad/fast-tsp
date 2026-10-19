@@ -127,6 +127,32 @@ def test_errors_with_invalid_max_threads(max_threads: int):
         fast_tsp.find_tour(_euclidean(30, 0), duration_seconds=0.1, max_threads=max_threads)
 
 
+@pytest.mark.parametrize('candidates', ['auto', 'nearest', 'alpha'])
+def test_candidates_option(candidates: str):
+    n = 40
+    dists = _euclidean(n, 1)
+    tour = fast_tsp.find_tour(dists, duration_seconds=0.1, candidates=candidates)  # type: ignore[arg-type]
+    assert fast_tsp.is_valid_tour(n, tour)
+
+
+def test_errors_with_invalid_candidates():
+    with pytest.raises(ValueError, match="candidates must be 'auto', 'nearest' or 'alpha'"):
+        fast_tsp.find_tour(_euclidean(30, 0), duration_seconds=0.1, candidates='best')  # type: ignore[arg-type]
+
+
+def test_stop_when_converged_returns_before_the_deadline():
+    n = 30
+    dists = _euclidean(n, 2)
+    start = time.perf_counter()
+    tour = fast_tsp.find_tour(dists, duration_seconds=0.5)
+    assert time.perf_counter() - start >= 0.45  # the whole budget is used by default
+    assert fast_tsp.is_valid_tour(n, tour)
+    start = time.perf_counter()
+    tour = fast_tsp.find_tour(dists, duration_seconds=30, stop_when_converged=True)
+    assert time.perf_counter() - start < 20
+    assert fast_tsp.is_valid_tour(n, tour)
+
+
 def test_max_threads_is_ignored_for_exact_problems():
     dists = _euclidean(10, 0)
     assert fast_tsp.find_tour(dists, max_threads=None) == fast_tsp.solve_tsp_exact(dists)

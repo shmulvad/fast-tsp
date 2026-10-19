@@ -82,9 +82,8 @@ Choosing the time budget
 #########################
 
 :pyt:`duration_seconds` (default 2.0) is a wall-clock budget for the whole
-call, including setup. The solver returns earlier when its search has
-converged, which is usual for small problems, so a generous budget costs
-nothing on easy inputs. As a rule of thumb from the TSPLIB instances (see
+call, including setup, and the solver keeps looking for a better tour until it
+runs out. As a rule of thumb from the TSPLIB instances (see
 :doc:`comparisons`): a few hundred nodes are solved to optimality or very
 close to it within 0.2 seconds, a few thousand nodes are within about 1 % of
 the optimum after 0.2 seconds and within a few tenths of a percent after
@@ -94,6 +93,37 @@ stops the search and raises :pyt:`KeyboardInterrupt`.
 .. code-block:: python
 
     tour = fast_tsp.find_tour(dists, duration_seconds=0.5)
+
+If you would rather get the answer back as soon as the search stops making
+progress, pass :pyt:`stop_when_converged=True`. The solver then returns once
+it has gone :pyt:`max(100_000, 500 * n)` perturbations without improving the
+best tour, which on small problems happens within a second or two. Problems
+of 20 nodes or fewer are solved exactly and return immediately either way,
+and a budget of :pyt:`float('inf')` always stops on convergence.
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=30, stop_when_converged=True)
+
+
+Candidate lists
+################
+
+The local search only considers moves between each node and a short list of
+candidate neighbours. :pyt:`candidates` chooses how those lists are built:
+
+* :pyt:`'nearest'`: the nearest neighbours of each node. Cheap to build.
+* :pyt:`'alpha'`: LKH-style alpha-nearness. A minimum 1-tree with
+  subgradient-optimised node penalties ranks neighbours by how likely their
+  edge is to be in an optimal tour. The preprocessing costs time up front
+  (seconds for several thousand nodes) but improves the tours found per second
+  on large problems.
+* :pyt:`'auto'` (default): the alpha lists when the preprocessing fits
+  comfortably in the budget, otherwise the nearest neighbours.
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=10, candidates='alpha')
 
 
 Using multiple cores

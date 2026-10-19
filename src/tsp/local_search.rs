@@ -4,7 +4,9 @@
 //! the best tour and walking from any tour within a small slack of it.
 //! A walk that stops improving restarts from a perturbed best tour.
 //! Every step costs time proportional to the work it causes, not to the
-//! tour length.
+//! tour length. The search runs until the deadline unless
+//! `SearchOptions::stop_when_converged` lets it return once it has gone a
+//! long time without a better tour.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -16,7 +18,7 @@ use super::candidates::nearest;
 use super::greedy::nearest_neighbor_tour;
 #[cfg(test)]
 use super::greedy_nearest_neighbor;
-use super::{Budget, DistMatrix, Tour};
+use super::{Budget, Candidates, DistMatrix, SearchOptions, Tour};
 
 /// How many nearest neighbours each node considers in 2-opt, 3-opt and LK.
 ///
@@ -68,7 +70,8 @@ const KICK_SEGMENT_MAX: usize = 200;
 /// out of a basin, but never far from the best tour, so no restarts are
 /// needed. 0 gives the old rule (accept ties with the best).
 const ACCEPT_SLACK_PER_EDGE: f64 = 0.1;
-/// A search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
+/// With `SearchOptions::stop_when_converged` (or without a deadline) a
+/// search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
 /// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour.
 /// Larger instances are bound by the time limit. Before walk restarts (see
 /// `RESTART_KICKS_PER_NODE`) this was 100 per node / 20 000, which ended
@@ -133,15 +136,25 @@ struct Neighbours {
 impl Neighbours {
     /// O(n^2), on up to `threads` threads. Returns `None` if the budget
     /// runs out (deadline or interrupt) before the lists are complete.
-    fn build(dists: &DistMatrix, budget: &Budget<'_>, threads: usize) -> Option<Self> {
+    fn build(
+        dists: &DistMatrix,
+        budget: &Budget<'_>,
+        threads: usize,
+        candidates: Candidates,
+    ) -> Option<Self> {
         let k = NEIGH_LIMIT.min(dists.len().saturating_sub(1));
-        nearest(dists, k, budget, threads).map(|data| Self { k, data })
+        match candidates {
+            Candidates::Auto | Candidates::Nearest | Candidates::Alpha => {
+                nearest(dists, k, budget, threads).map(|data| Self { k, data })
+            }
+        }
     }
 
-    /// `build` on one thread, for tests with a budget that cannot run out.
+    /// `build` on one thread with nearest neighbours, for tests with a
+    /// budget that cannot run out.
     #[cfg(test)]
     fn new(dists: &DistMatrix, budget: &Budget<'_>) -> Self {
-        Self::build(dists, budget, 1).expect("the budget ran out")
+        Self::build(dists, budget, 1, Candidates::Nearest).expect("the budget ran out")
     }
 
     #[inline(always)]
@@ -232,9 +245,12 @@ pub(crate) fn local_search(
     budget: &Budget<'_>,
     threads: usize,
     seed: Option<u64>,
+    options: &SearchOptions,
 ) -> Tour {
     let mut rng = seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed);
-    let Some(nn) = Neighbours::build(dists, budget, threads) else {
+    // Without a deadline the convergence rule is the only way to stop.
+    let stop = options.stop_when_converged || budget.deadline().is_none();
+    let Some(nn) = Neighbours::build(dists, budget, threads, options.candidates) else {
         // An interrupted run's tour is discarded; otherwise return the
         // cheapest reasonable tour.
         if budget.check_interrupted().is_err() {
@@ -249,27 +265,27 @@ pub(crate) fn local_search(
     let shared = SharedBest::new(cost(dists, &start), start);
 
     if threads <= 1 {
-        search(dists, &nn, &shared, budget, &mut rng);
+        search(dists, &nn, &shared, budget, &mut rng, stop);
     } else {
-        let stop = AtomicBool::new(false);
+        let stop_flag = AtomicBool::new(false);
         let deadline = budget.deadline();
         thread::scope(|scope| {
             let workers: Vec<_> = (1..threads)
                 .map(|_| {
-                    let (nn, shared, stop) = (&nn, &shared, &stop);
+                    let (nn, shared, stop_flag) = (&nn, &shared, &stop_flag);
                     let mut worker_rng = rng.fork();
                     scope.spawn(move || {
-                        let budget = Budget::worker(deadline, stop);
-                        search(dists, nn, shared, &budget, &mut worker_rng);
+                        let budget = Budget::worker(deadline, stop_flag);
+                        search(dists, nn, shared, &budget, &mut worker_rng, stop);
                     })
                 })
                 .collect();
-            search(dists, &nn, &shared, budget, &mut rng);
+            search(dists, &nn, &shared, budget, &mut rng, stop);
             // This thread may finish first (or be interrupted). Keep polling
             // the callback until the other threads are done.
             while !workers.iter().all(|w| w.is_finished()) {
                 if budget.is_interrupted() {
-                    stop.store(true, Ordering::Relaxed);
+                    stop_flag.store(true, Ordering::Relaxed);
                 }
                 thread::sleep(WAIT_POLL_INTERVAL);
             }
@@ -282,7 +298,7 @@ pub(crate) fn local_search(
 /// and continue from the result if it is within the acceptance slack of the
 /// walk's record (see `ACCEPT_SLACK_PER_EDGE`), restarting the walk from a
 /// perturbed best tour when it stagnates (see `RESTART_KICKS_PER_NODE`).
-/// Stops when the budget is exceeded or after
+/// Stops when the budget is exceeded or, with `stop_when_converged`, after
 /// `max_kicks_without_improvement(n)` perturbations in a row that did not
 /// lead to a better tour (found by this thread or any other).
 ///
@@ -295,8 +311,17 @@ fn search(
     shared: &SharedBest,
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
+    stop_when_converged: bool,
 ) {
-    search_with_slack(dists, nn, shared, budget, rng, ACCEPT_SLACK_PER_EDGE);
+    search_with_slack(
+        dists,
+        nn,
+        shared,
+        budget,
+        rng,
+        ACCEPT_SLACK_PER_EDGE,
+        stop_when_converged,
+    );
 }
 
 /// `search` with the acceptance slack as a parameter. Returns the cost of
@@ -309,6 +334,7 @@ fn search_with_slack(
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
     slack_per_edge: f64,
+    stop_when_converged: bool,
 ) -> i64 {
     let n = dists.len();
     let mut tour = Vec::with_capacity(n);
@@ -330,8 +356,12 @@ fn search_with_slack(
     let mean_edge = (best_cost as f64 / n as f64).max(1.0);
     let slack = (slack_per_edge * mean_edge).round() as i64;
 
-    let max_fails = max_kicks_without_improvement(n);
-    let mut num_iter_no_improvement = 0;
+    let max_fails = if stop_when_converged {
+        max_kicks_without_improvement(n)
+    } else {
+        u32::MAX
+    };
+    let mut num_iter_no_improvement: u32 = 0;
     // The walk's own record and the kicks since it last improved, for the
     // restarts (see `RESTART_KICKS_PER_NODE`). Until the first restart the
     // record is the best tour.
@@ -384,7 +414,7 @@ fn search_with_slack(
         } else {
             // Only a strictly better tour resets the counter; otherwise the
             // walk (and its restarts) could keep the search alive forever.
-            num_iter_no_improvement += 1;
+            num_iter_no_improvement = num_iter_no_improvement.saturating_add(1);
         }
         if cost < walk_best {
             walk_best = cost;
@@ -1674,12 +1704,24 @@ mod tests {
     }
 
     #[test]
+    fn whole_budget_is_used_by_default() {
+        // `stop_when_converged` returning early is covered by
+        // `infinite_duration_terminates` (no deadline) and the Python tests
+        // (a debug build is too slow to time 100 000 kicks here).
+        let d = euclidean(30, 3);
+        let start = std::time::Instant::now();
+        let budget = Budget::new(start, 0.5).unwrap();
+        local_search(&d, &budget, 1, Some(1), &SearchOptions::default());
+        assert!(start.elapsed().as_secs_f64() >= 0.45);
+    }
+
+    #[test]
     fn expired_budget_still_returns_a_tour() {
         let d = euclidean(300, 2);
         let start = std::time::Instant::now() - Duration::from_secs(2);
         let past = Budget::new(start, 1.0).unwrap();
         for threads in [1, 4] {
-            let tour = local_search(&d, &past, threads, Some(1));
+            let tour = local_search(&d, &past, threads, Some(1), &SearchOptions::default());
             let tour: Vec<Node> = tour.into_iter().map(|v| v as Node).collect();
             assert!(is_valid(&tour));
         }
@@ -1698,7 +1740,14 @@ mod tests {
                 .collect();
             let shared = SharedBest::new(cost(&d, &start), start.clone());
             let budget = Budget::new(std::time::Instant::now(), 0.2).unwrap();
-            search(&d, &nn, &shared, &budget, &mut fastrand::Rng::with_seed(4));
+            search(
+                &d,
+                &nn,
+                &shared,
+                &budget,
+                &mut fastrand::Rng::with_seed(4),
+                true,
+            );
             let tracked = shared.cost();
             let tour = shared.into_tour();
             assert!(is_valid(&tour));
@@ -1723,7 +1772,7 @@ mod tests {
         let shared = SharedBest::new(cost(&d, &start), start.clone());
         let budget = Budget::new(std::time::Instant::now(), 0.1).unwrap();
         let mut rng = fastrand::Rng::with_seed(2);
-        let walk_cost = search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0);
+        let walk_cost = search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0, true);
         let best = shared.cost();
         let tour = shared.into_tour();
         assert!(is_valid(&tour));

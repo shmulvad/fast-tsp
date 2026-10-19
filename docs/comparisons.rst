@@ -37,9 +37,8 @@ Setup
 
 Time limits are wall-clock budgets handed to the solver, and all of them stayed
 within a few hundred milliseconds of their budget (OR-Tools needs up to half a
-second extra to build its model on the largest instance). ``fast-tsp`` returns
-earlier than the budget when its search has converged, for example on the
-instances where it reports 0.0 %.
+second extra to build its model on the largest instance). ``fast-tsp`` was run
+with its defaults, so it used the whole budget.
 
 Results
 #######
