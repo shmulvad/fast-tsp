@@ -1286,6 +1286,8 @@ pub(crate) struct Lists {
     /// nearest when no ascent ran.
     pub(crate) ka: usize,
     pub(crate) alpha: Vec<u32>,
+    /// Whether `alpha` comes from a subgradient ascent (false: the nearest).
+    pub(crate) from_ascent: bool,
 }
 
 /// The first `width` of every `k`-long row of `lists`.
@@ -1333,6 +1335,7 @@ pub(crate) fn candidate_lists(
         data: prefix(&near, kn, k),
         ka,
         alpha: prefix(&near, kn, ka),
+        from_ascent: false,
     };
     if n < 3 || ka == 0 {
         return Some(fallback());
@@ -1379,6 +1382,7 @@ pub(crate) fn candidate_lists(
         data,
         ka,
         alpha,
+        from_ascent: true,
     })
 }
 
