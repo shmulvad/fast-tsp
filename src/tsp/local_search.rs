@@ -1,7 +1,9 @@
 //! Iterated local search: repeated local perturbation (a double bridge
-//! confined to a short window) followed by a 2-opt/3-opt descent around
-//! the perturbed nodes, keeping the best tour. Every step costs time
-//! proportional to the work it causes, not to the tour length.
+//! confined to a short window, now and then a global one) followed by a
+//! Lin-Kernighan + 2-opt/3-opt descent around the perturbed nodes, keeping
+//! the best tour and walking from any tour within a small slack of it.
+//! Every step costs time proportional to the work it causes, not to the
+//! tour length.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -48,15 +50,32 @@ enum Kick {
 /// costs about 10x more than with 2-opt/3-opt alone, so global kicks must be
 /// about as much more frequent to keep their rate per second (clustered
 /// instances such as fl1577 depend on that rate; 128 was tuned without LK).
+/// With LK, 4..64 score the same on the dev set (3 seeds) except fl1577,
+/// which looked best at 16.
 const KICK: Kick = Kick::SegmentDoubleBridge;
 const GLOBAL_KICK_ONE_IN: u32 = 16;
-/// Longest segment of a local kick.
-const KICK_SEGMENT_MAX: usize = 100;
+/// Longest segment of a local kick. Each of the three segments is drawn
+/// uniformly from `1..=KICK_SEGMENT_MAX`. 200 rather than 100: the longer
+/// segments let the local kick move whole clusters (fl1577 at 0.2 s, mean
+/// over 8 seeds: 0.69 -> 0.88 with LK) and help most mid-sized instances;
+/// 30-50 or a bias towards short segments is clearly worse.
+const KICK_SEGMENT_MAX: usize = 200;
+/// Acceptance ("record-to-record travel"): a kicked and re-optimised tour
+/// becomes the tour the search continues from if its cost is at most
+/// `best + slack`, where `slack` is this fraction of the mean edge length
+/// of the first local optimum. The walk can thus drift a little uphill
+/// out of a basin, but never far from the best tour, so no restarts are
+/// needed. 0 gives the old rule (accept ties with the best).
+const ACCEPT_SLACK_PER_EDGE: f64 = 0.1;
 /// A search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
 /// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour.
-/// Larger instances are bound by the time limit.
-const KICKS_PER_NODE: usize = 1000;
-const MIN_KICKS_WITHOUT_IMPROVEMENT: u32 = 50_000;
+/// Larger instances are bound by the time limit. With LK in the descent a
+/// kick does about 10x the work of a 2-opt/3-opt kick, so 100 kicks per
+/// node is about the work 1000 were before. On the 44 cases with n <= 442,
+/// 30, 100, 300 and 1000 per node all find the optimum at 2 s (1 and 4
+/// threads); 100 uses 30-36 s of the 88 s budget, 1000 uses 76 s.
+const KICKS_PER_NODE: usize = 100;
+const MIN_KICKS_WITHOUT_IMPROVEMENT: u32 = 20_000;
 /// Maximum number of flips in one Lin-Kernighan step.
 const LK_MAX_DEPTH: usize = 25;
 /// How many choices of `t3` an LK step tries at its first levels before
@@ -238,8 +257,9 @@ pub(crate) fn local_search(
     shared.into_tour().into_iter().map(|v| v as usize).collect()
 }
 
-/// One search thread: perturb the best tour, re-optimise it locally, and
-/// keep the result if it is at least as good. Stops when the budget is
+/// One search thread: perturb the current tour, re-optimise it locally,
+/// and continue from the result if it is within the acceptance slack of the
+/// best tour (see `ACCEPT_SLACK_PER_EDGE`). Stops when the budget is
 /// exceeded or after `max_kicks_without_improvement(n)` perturbations in a
 /// row that did not lead to a better tour (found by this thread or any other).
 ///
@@ -253,25 +273,49 @@ fn search(
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
 ) {
+    search_with_slack(dists, nn, shared, budget, rng, ACCEPT_SLACK_PER_EDGE);
+}
+
+/// `search` with the acceptance slack as a parameter. Returns the cost of
+/// the tour the walk ended on, which may be worse than the best tour (the
+/// best tour is only ever published to `shared`).
+fn search_with_slack(
+    dists: &DistMatrix,
+    nn: &Neighbours,
+    shared: &SharedBest,
+    budget: &Budget<'_>,
+    rng: &mut fastrand::Rng,
+    slack_per_edge: f64,
+) -> i64 {
     let n = dists.len();
     let mut tour = Vec::with_capacity(n);
-    let mut best_cost = shared.copy_into(&mut tour);
+    let mut cur_cost = shared.copy_into(&mut tour);
     let mut opt = Opt::new(dists, nn, tour);
 
     // Full descent from the start tour, every node active.
     opt.activate_all();
-    best_cost -= opt.descend(budget);
+    cur_cost -= opt.descend(budget);
     opt.journal.clear();
-    debug_assert_eq!(best_cost, cost(dists, &opt.tour));
-    shared.offer(best_cost, &opt.tour);
+    debug_assert_eq!(cur_cost, cost(dists, &opt.tour));
+    shared.offer(cur_cost, &opt.tour);
+
+    // The walk (`opt.tour`, `cur_cost`) may be up to `slack` worse than the
+    // best tour this thread knows, so keep a copy of that. Copying on each
+    // new best costs O(n), but new bests are rare compared with kicks.
+    let mut best_cost = cur_cost;
+    let mut best_tour = opt.tour.clone();
+    let mean_edge = (best_cost as f64 / n as f64).max(1.0);
+    let slack = (slack_per_edge * mean_edge).round() as i64;
 
     let max_fails = max_kicks_without_improvement(n);
     let mut num_iter_no_improvement = 0;
     while !budget.is_exceeded() && num_iter_no_improvement < max_fails {
         if shared.cost() < best_cost {
             // Another thread found a better tour: continue from it.
-            best_cost = shared.copy_into(&mut opt.tour);
+            best_cost = shared.copy_into(&mut best_tour);
+            opt.tour.clone_from(&best_tour);
             opt.reset_positions();
+            cur_cost = best_cost;
             num_iter_no_improvement = 0;
         }
 
@@ -283,27 +327,31 @@ fn search(
         } else {
             KICK
         };
-        let delta = opt.kick(kick, best_cost, rng);
+        let delta = opt.kick(kick, cur_cost, rng);
         let gain = opt.descend(budget);
-        let cost = best_cost + delta - gain;
-        if cost <= best_cost {
+        let cost = cur_cost + delta - gain;
+        if cost < best_cost {
             debug_assert_eq!(cost, self::cost(dists, &opt.tour));
-            // Equal-cost tours are accepted so the search can drift across
-            // plateaus, but only a strictly better tour resets the counter.
-            // Otherwise ties would keep the search alive forever.
-            if cost < best_cost {
-                num_iter_no_improvement = 0;
-                shared.offer(cost, &opt.tour);
-            } else {
-                num_iter_no_improvement += 1;
-            }
+            num_iter_no_improvement = 0;
+            shared.offer(cost, &opt.tour);
+            best_tour.clone_from(&opt.tour);
             best_cost = cost;
+            cur_cost = cost;
             opt.journal.clear();
         } else {
-            opt.undo();
+            // Only a strictly better tour resets the counter; otherwise the
+            // walk could keep the search alive forever.
             num_iter_no_improvement += 1;
+            if cost <= best_cost + slack {
+                debug_assert_eq!(cost, self::cost(dists, &opt.tour));
+                cur_cost = cost;
+                opt.journal.clear();
+            } else {
+                opt.undo();
+            }
         }
     }
+    cur_cost
 }
 
 /// How many kicks in a row without a strictly better tour end a search
@@ -1532,5 +1580,30 @@ mod tests {
             assert!(tracked < cost(&d, &start));
             assert_eq!(tracked, cost(&d, &tour));
         }
+    }
+
+    #[test]
+    fn search_publishes_best_tour_when_walk_ends_worse() {
+        // With a huge acceptance slack the walk accepts almost every kick
+        // and ends far above the best tour; `shared` must still hold the
+        // best tour, with its exact cost.
+        let n = 200;
+        let d = euclidean(n, 9);
+        let nn = Neighbours::new(&d, &Budget::unlimited());
+        let start: Vec<Node> = greedy_nearest_neighbor(&d)
+            .unwrap()
+            .into_iter()
+            .map(|v| v as Node)
+            .collect();
+        let shared = SharedBest::new(cost(&d, &start), start.clone());
+        let budget = Budget::new(std::time::Instant::now(), 0.1).unwrap();
+        let mut rng = fastrand::Rng::with_seed(2);
+        let walk_cost = search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0);
+        let best = shared.cost();
+        let tour = shared.into_tour();
+        assert!(is_valid(&tour));
+        assert_eq!(best, cost(&d, &tour));
+        assert!(best < cost(&d, &start));
+        assert!(walk_cost > best, "walk {walk_cost}, best {best}");
     }
 }

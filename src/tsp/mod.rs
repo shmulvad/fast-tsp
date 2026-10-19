@@ -215,7 +215,7 @@ impl<'a> Budget<'a> {
 
 /// Finds a good tour. Small problems are solved exactly. Larger ones use
 /// local search on `threads` threads (at least one) until the budget runs
-/// out or each thread has gone `max(50_000, 1000 * n)` perturbations
+/// out or each thread has gone `max(20_000, 100 * n)` perturbations
 /// without improving the best tour.
 pub fn find_tour(dists: &DistMatrix, budget: &Budget, threads: usize) -> Result<Tour> {
     find_tour_impl(dists, budget, threads, None)
