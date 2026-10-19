@@ -127,7 +127,9 @@ candidate neighbours. :pyt:`candidates` chooses how those lists are built:
   instance up to 4461 nodes; with 0.2 seconds, up to about 1800 nodes.
 
 Forcing :pyt:`'alpha'` on a short budget spends up to half of it on the
-preprocessing, and :pyt:`'nearest'` is what versions up to 0.2.1 used.
+preprocessing. :pyt:`'nearest'` is what versions up to 0.2.1 used, and it is
+still the better choice on a few instances whose alpha lists are poor (the
+TSPLIB instance ``rl5915`` is one), so try it if a result disappoints.
 
 .. code-block:: python
 

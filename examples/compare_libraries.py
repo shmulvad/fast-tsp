@@ -7,7 +7,9 @@ Produces the tables in docs/comparisons.rst. Install the competitors first:
 Then run from the repository root (every solver runs in a fresh process, one
 at a time, and the reStructuredText tables are printed at the end):
 
-    python examples/compare_libraries.py [--cases berlin52,kroA200,...] [--budgets 0.2,2,10]
+    python examples/compare_libraries.py [--cases berlin52,kroA200,...] [--budgets 0.2,2,10] [--repeats 3]
+
+With `--repeats`, the tables show the median over the runs of each cell.
 
 LKH-3 is included when `--lkh /path/to/LKH` points at a binary built from
 http://webhotel4.ruc.dk/~keld/research/LKH-3/ (it is run with TIME_LIMIT and
@@ -25,6 +27,7 @@ import argparse
 import json
 import os
 import pathlib
+import statistics
 import subprocess  # noqa: S404  (runs this script itself)
 import sys
 import time
@@ -250,11 +253,22 @@ def cell(r: dict | None, show_time: bool = False) -> str:
     if 'error' in r:
         if r['error'].startswith('killed'):
             return 'killed'
-        return 'no tour' if 'no tour within' in r['error'] else 'error'
-    s = f'{r["gap_pct"]:.1f} %'
+        return f'no tour ({r["elapsed"]:.1f} s)' if 'no tour within' in r['error'] else 'error'
+    s = f'{r["gap_pct"]:.2f} %'
     if show_time:
         s += f' ({r["elapsed"]:.1f} s)'
     return s
+
+
+def median_of(runs: list[dict]) -> dict:
+    """One record per cell: the median gap and elapsed time over the successful runs, else the last error."""
+    good = [r for r in runs if 'error' not in r]
+    if not good:
+        return runs[-1]
+    med = dict(good[len(good) // 2])
+    med['gap_pct'] = statistics.median(r['gap_pct'] for r in good)
+    med['elapsed'] = statistics.median(r['elapsed'] for r in good)
+    return med
 
 
 def rst_table(header: list[str], rows: list[list[str]]) -> str:
@@ -272,12 +286,15 @@ def rst_table(header: list[str], rows: list[list[str]]) -> str:
 
 
 def report(recs: list[dict], cases: list[str], budgets: list[float], budgeted=BUDGETED) -> str:
-    res: dict = defaultdict(dict)
+    runs: dict = defaultdict(list)
     n_of = {}
     for r in recs:
-        res[r['solver'], r['case']][r['budget']] = r
+        runs[r['solver'], r['case'], r['budget']].append(r)
         if 'n' in r:
             n_of[r['case']] = r['n']
+    res: dict = defaultdict(dict)
+    for (solver, case, budget), rs in runs.items():
+        res[solver, case][budget] = median_of(rs)
     out = []
     for budget in budgets:
         out.append(f'\nTime budget {budget:g} s\n')
@@ -298,22 +315,24 @@ def main() -> None:
     ap.add_argument('--budgets', default=','.join(str(b) for b in DEFAULT_BUDGETS))
     ap.add_argument('--out', default='compare_results.jsonl', help='where to append the raw results')
     ap.add_argument('--lkh', default=None, help='path to an LKH-3 binary; adds the LKH-3 columns')
+    ap.add_argument('--repeats', type=int, default=1, help='runs per cell; the tables show the median')
     args = ap.parse_args()
     cases = args.cases.split(',')
     budgets = [float(b) for b in args.budgets.split(',')]
     budgeted = list(BUDGETED)
     if args.lkh:
         os.environ['LKH_BINARY'] = str(pathlib.Path(args.lkh).resolve())
-        budgeted += LKH
+        budgeted = budgeted[:2] + LKH + budgeted[2:]
     recs = []
     with pathlib.Path(args.out).open('a') as out:
         for case in cases:
             for solver, _ in budgeted:
                 for budget in budgets:
-                    recs.append(measure(solver, case, budget, timeout=3 * budget + 120))
-                    out.write(json.dumps(recs[-1]) + '\n')
-                    out.flush()
-                    print(recs[-1], file=sys.stderr, flush=True)
+                    for _ in range(args.repeats):
+                        recs.append(measure(solver, case, budget, timeout=3 * budget + 120))
+                        out.write(json.dumps(recs[-1]) + '\n')
+                        out.flush()
+                        print(recs[-1], file=sys.stderr, flush=True)
             for solver, _ in UNBUDGETED:
                 recs.append(measure(solver, case, 0.0, timeout=UNBUDGETED_TIMEOUT))
                 out.write(json.dumps(recs[-1]) + '\n')
