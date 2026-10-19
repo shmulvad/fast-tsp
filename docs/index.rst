@@ -1,7 +1,7 @@
 fast-tsp
 ============================
 
-An SLS (Stochastic Local Search) solver for TSP (Travelling Salesman Problem).
+A fast local-search solver for the TSP (Travelling Salesman Problem), written in Rust with Python bindings.
 
 .. image:: https://readthedocs.org/projects/fast-tsp/badge/?version=latest
    :target: https://fast-tsp.readthedocs.io/en/latest/?badge=latest
@@ -15,7 +15,7 @@ An SLS (Stochastic Local Search) solver for TSP (Travelling Salesman Problem).
    :target: https://pypi.org/project/fast-tsp/
    :alt: PyPI - Version
 
-.. image:: https://img.shields.io/badge/license-BSD-success?style=flat-square
+.. image:: https://img.shields.io/badge/license-MIT-success?style=flat-square
    :target: https://github.com/shmulvad/fast-tsp/blob/main/LICENSE
    :alt: License
 

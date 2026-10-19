@@ -1,6 +1,6 @@
 [package]
 name = "fast_tsp"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 description = "A fast TSP solver with Python bindings"
@@ -12,6 +12,12 @@ publish = false
 [lib]
 name = "_core"
 crate-type = ["cdylib", "rlib"]
+
+# Kattis-style benchmark: `cargo run --release --example bench -- --help`.
+# `test = true` makes plain `cargo test` run its unit tests too.
+[[example]]
+name = "bench"
+test = true
 
 [dependencies]
 fastrand = "2.3"

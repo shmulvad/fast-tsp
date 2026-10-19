@@ -19,6 +19,7 @@ for the TSP solver. To use it, first import it
     greedy_nearest_neighbor
     solve_tsp_exact
     is_valid_tour
+    is_valid_dist_matrix
     compute_cost
     score_tour
 """
@@ -157,8 +158,8 @@ def _check_dist_matrix_pure_python(dists: Any) -> str | None:
 def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int | None = 1) -> Tour:
     """Find a tour using the fast heuristic.
 
-    Run a local solver to find a near-optimal TSP tour. For small
-    problems, the exact solution is returned.
+    Run a local solver to find a near-optimal TSP tour. Problems of 20
+    nodes or fewer are solved exactly.
 
     The distance matrix must be symmetric (``dists[i][j] == dists[j][i]``).
     The local search used for more than 20 nodes relies on this and does
@@ -166,7 +167,10 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int
 
     Args:
         dists: A symmetric distance matrix.
-        duration_seconds: The maximum duration of the tour.
+        duration_seconds: Wall-clock time budget for the call in seconds,
+            including setup. The solver returns earlier when its search has
+            converged. Ctrl-C stops the search and raises
+            ``KeyboardInterrupt``.
         max_threads: How many threads search together. More threads find
             better tours in the same time, mainly for larger problems.
             ``None`` uses one fewer than the number of available CPU cores.
@@ -284,6 +288,7 @@ __all__ = [
     'compute_cost',
     'find_tour',
     'greedy_nearest_neighbor',
+    'is_valid_dist_matrix',
     'is_valid_tour',
     'score_tour',
     'solve_tsp_exact',

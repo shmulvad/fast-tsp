@@ -1,10 +1,23 @@
 About
 ===========
 
-This is a Travelling Salesman Problem (TSP) solver with the core logic written in Rust and then using Python bindings.
-It uses iterative stochastic local search to find a near-optimal solution to the TSP in a reasonable amount of time.
+This is a Travelling Salesman Problem (TSP) solver with the core written in Rust
+and Python bindings on top. It works on a symmetric integer distance matrix and
+finds near-optimal tours within a time budget you choose.
 
-It is extremely fast and provides solutions that are of high quality compared to other available modules.
-See the comparisons for more details.
+Problems of up to 20 nodes are solved exactly with the Held-Karp dynamic
+program. Larger problems use an iterated local search: a nearest-neighbour
+start tour is improved with a Lin-Kernighan style variable-depth move (with
+2-opt and 3-opt as fallback) restricted to each node's 20 nearest neighbours,
+and then repeatedly perturbed with small double-bridge kicks and re-optimised
+around the change. Only the nodes touched by a kick are re-examined, so each
+kick costs work proportional to the change rather than to the problem size,
+and a walk that stops improving is restarted from a perturbed copy of the best
+tour. Several threads can search together and share the best tour.
 
-As of current development, the solver has reached state-of-the-art (SOTA) performance.
+On the TSPLIB instances with up to 4461 nodes the solver typically returns the
+optimal tour within 2 seconds for instances below about 1000 nodes and stays
+within 1 % of the optimum on the largest ones even with a 0.2 second budget.
+See :doc:`comparisons` for measurements against other Python packages, and
+the ``examples/bench.rs`` benchmark in the repository for the full 73-instance
+scoreboard.

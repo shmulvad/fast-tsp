@@ -1,6 +1,7 @@
 //! Pure-Rust TSP solver core. Has no Python dependencies so it can be unit
 //! tested with plain `cargo test`.
 
+mod candidates;
 mod exact;
 mod greedy;
 mod local_search;
@@ -214,16 +215,38 @@ impl<'a> Budget<'a> {
 
 /// Finds a good tour. Small problems are solved exactly. Larger ones use
 /// local search on `threads` threads (at least one) until the budget runs
-/// out or each thread has gone 5000 perturbations without improving the
-/// best tour.
+/// out or each thread has gone `max(100_000, 500 * n)` perturbations
+/// without improving the best tour.
 pub fn find_tour(dists: &DistMatrix, budget: &Budget, threads: usize) -> Result<Tour> {
+    find_tour_impl(dists, budget, threads, None)
+}
+
+/// Like [`find_tour`], but the local search draws its random perturbations
+/// from `seed` instead of system entropy. Runs are still not deterministic
+/// when a deadline cuts the search short, but the perturbation sequence is
+/// repeatable, which makes benchmark comparisons less noisy.
+pub fn find_tour_seeded(
+    dists: &DistMatrix,
+    budget: &Budget,
+    threads: usize,
+    seed: u64,
+) -> Result<Tour> {
+    find_tour_impl(dists, budget, threads, Some(seed))
+}
+
+fn find_tour_impl(
+    dists: &DistMatrix,
+    budget: &Budget,
+    threads: usize,
+    seed: Option<u64>,
+) -> Result<Tour> {
     if dists.len() < 2 {
         return invalid("Need at least 2 nodes");
     }
     if dists.len() <= EXACT_SOLUTION_THRESHOLD {
         return solve_tsp_exact(dists, budget);
     }
-    let tour = local_search::local_search(dists, budget, threads);
+    let tour = local_search::local_search(dists, budget, threads, seed);
     budget.check_interrupted()?;
     Ok(tour)
 }

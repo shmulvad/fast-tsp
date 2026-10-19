@@ -55,7 +55,7 @@ master_doc = 'index'
 
 # General information about the project.
 project = 'fast_tsp'
-copyright = '2023, Søren Mulvad'  # noqa: A001
+copyright = '2022-2026, Søren Mulvad'  # noqa: A001
 author = 'Søren Mulvad'
 
 
