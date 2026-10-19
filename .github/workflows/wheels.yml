@@ -113,7 +113,7 @@ jobs:
             test_pythons: "3.11 3.14t 3.15+gil 3.15t"
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           architecture: ${{ matrix.platform.python_arch }}
@@ -122,7 +122,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.12
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         if: matrix.platform.target != 'x86'
         with:
           python-version: "3.14t"
@@ -133,7 +133,7 @@ jobs:
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist -i python3.14t
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.15"
           architecture: ${{ matrix.platform.python_arch }}
@@ -166,7 +166,7 @@ jobs:
           - { runner: macos-latest, target: aarch64 }
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: |
             3.12
