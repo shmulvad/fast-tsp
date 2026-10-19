@@ -10,9 +10,20 @@ use std::thread;
 use std::time::Duration;
 
 use super::candidates::nearest;
-use super::{Budget, DistMatrix, Tour, greedy_nearest_neighbor};
+use super::greedy::nearest_neighbor_tour;
+#[cfg(test)]
+use super::greedy_nearest_neighbor;
+use super::{Budget, DistMatrix, Tour};
 
-/// How many nearest neighbours each node considers in 2-opt and 3-opt.
+/// How many nearest neighbours each node considers in 2-opt, 3-opt and LK.
+///
+/// Measured with the LK descent: shorter lists (8-16, also for LK alone)
+/// lose quality without making kicks measurably cheaper (the positive-gain
+/// `break` ends most scans early), mainly on instances with many equal
+/// distances (d1291, rl1889) and on fl*. Alpha-nearness lists (LKH style,
+/// pure or mixed with nearest, gated by build cost) and minimum-spanning-
+/// tree neighbours give better tours per kick on clustered instances but
+/// were within noise of these lists in the timed benchmark.
 const NEIGH_LIMIT: usize = 20;
 /// Width of the window that the global kick shuffles.
 const GEO_SHUFFLE_WIDTH: usize = 30;
@@ -80,21 +91,17 @@ struct Neighbours {
 }
 
 impl Neighbours {
-    /// O(n^2). If the budget is interrupted while building, the lists are
-    /// left empty; the search loop will not run in that case anyway.
-    fn new(dists: &DistMatrix, budget: &Budget<'_>) -> Self {
+    /// O(n^2), on up to `threads` threads. Returns `None` if the budget
+    /// runs out (deadline or interrupt) before the lists are complete.
+    fn build(dists: &DistMatrix, budget: &Budget<'_>, threads: usize) -> Option<Self> {
         let k = NEIGH_LIMIT.min(dists.len().saturating_sub(1));
-        match nearest(dists, k, budget) {
-            Some(data) => Self { k, data },
-            None => Self::empty(),
-        }
+        nearest(dists, k, budget, threads).map(|data| Self { k, data })
     }
 
-    fn empty() -> Self {
-        Self {
-            k: 0,
-            data: Vec::new(),
-        }
+    /// `build` on one thread, for tests with a budget that cannot run out.
+    #[cfg(test)]
+    fn new(dists: &DistMatrix, budget: &Budget<'_>) -> Self {
+        Self::build(dists, budget, 1).expect("the budget ran out")
     }
 
     #[inline(always)]
@@ -171,8 +178,10 @@ impl SharedBest {
 /// waits for the other search threads to finish.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
-/// Runs the local search on `threads` threads, starting from the greedy
-/// tour, and returns the best tour found.
+/// Runs the local search on `threads` threads, starting from the
+/// nearest-neighbour tour, and returns the best tour found. If the budget
+/// runs out while the neighbour lists are built, returns the
+/// nearest-neighbour tour right away.
 ///
 /// The calling thread is one of the search threads. It alone runs the
 /// budget's interrupt callback (which may need the calling thread, e.g. to
@@ -185,12 +194,18 @@ pub(crate) fn local_search(
     seed: Option<u64>,
 ) -> Tour {
     let mut rng = seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed);
-    let nn = Neighbours::new(dists, budget);
-    let start: Vec<Node> = greedy_nearest_neighbor(dists)
-        .expect("n >= 2 is checked by the caller")
-        .into_iter()
-        .map(|v| v as Node)
-        .collect();
+    let Some(nn) = Neighbours::build(dists, budget, threads) else {
+        // An interrupted run's tour is discarded; otherwise return the
+        // cheapest reasonable tour.
+        if budget.check_interrupted().is_err() {
+            return (0..dists.len()).collect();
+        }
+        return nearest_neighbor_tour(dists)
+            .into_iter()
+            .map(|v| v as usize)
+            .collect();
+    };
+    let start = nearest_neighbor_tour(dists);
     let shared = SharedBest::new(cost(dists, &start), start);
 
     if threads <= 1 {
@@ -1482,6 +1497,18 @@ mod tests {
                  | with LK {lk:5.2}% {lk_ms:5.2} ms",
                 pct(&start)
             );
+        }
+    }
+
+    #[test]
+    fn expired_budget_still_returns_a_tour() {
+        let d = euclidean(300, 2);
+        let start = std::time::Instant::now() - Duration::from_secs(2);
+        let past = Budget::new(start, 1.0).unwrap();
+        for threads in [1, 4] {
+            let tour = local_search(&d, &past, threads, Some(1));
+            let tour: Vec<Node> = tour.into_iter().map(|v| v as Node).collect();
+            assert!(is_valid(&tour));
         }
     }
 
