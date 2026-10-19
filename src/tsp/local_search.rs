@@ -33,9 +33,12 @@ enum Kick {
 }
 
 /// The kick `search` uses, except for one kick in `GLOBAL_KICK_ONE_IN`
-/// (on average), which is `Kick::Global`.
+/// (on average), which is `Kick::Global`. With LK in the descent a kick
+/// costs about 10x more than with 2-opt/3-opt alone, so global kicks must be
+/// about as much more frequent to keep their rate per second (clustered
+/// instances such as fl1577 depend on that rate; 128 was tuned without LK).
 const KICK: Kick = Kick::SegmentDoubleBridge;
-const GLOBAL_KICK_ONE_IN: u32 = 128;
+const GLOBAL_KICK_ONE_IN: u32 = 16;
 /// Longest segment of a local kick.
 const KICK_SEGMENT_MAX: usize = 100;
 /// A search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
@@ -43,6 +46,13 @@ const KICK_SEGMENT_MAX: usize = 100;
 /// Larger instances are bound by the time limit.
 const KICKS_PER_NODE: usize = 1000;
 const MIN_KICKS_WITHOUT_IMPROVEMENT: u32 = 50_000;
+/// Maximum number of flips in one Lin-Kernighan step.
+const LK_MAX_DEPTH: usize = 25;
+/// How many choices of `t3` an LK step tries at its first levels before
+/// giving up on that level (backtracking). Deeper levels try only the best.
+const LK_BREADTH: [usize; 2] = [3, 1];
+const LK_MAX_BREADTH: usize = 3;
+const _: () = assert!(LK_BREADTH[0] <= LK_MAX_BREADTH && LK_BREADTH[1] <= LK_MAX_BREADTH);
 
 /// A node, or an index into the tour. Four bytes instead of `usize` keeps
 /// the tour, positions and neighbour lists compact, which makes the 2-opt
@@ -394,11 +404,40 @@ struct Opt<'a> {
     journal: Vec<Undo>,
     /// Queue pops so far, to check the deadline every `POPS_PER_DEADLINE_CHECK`.
     pops: u32,
+    /// Working state of the current Lin-Kernighan step.
+    lk: LkState,
+}
+
+/// Working state of one Lin-Kernighan step (`Opt::lk_from`), kept between
+/// steps so a step allocates nothing.
+#[derive(Default)]
+struct LkState {
+    /// `(t3, t4)` of each level of the current step.
+    steps: Vec<(Node, Node)>,
+    /// Edges added and removed by the current step (tabu lists).
+    added: Vec<(Node, Node)>,
+    removed: Vec<(Node, Node)>,
+    /// Best closed gain so far, its number of levels, and the journal
+    /// length right after its last flip.
+    best_gain: i64,
+    best_len: usize,
+    best_journal: usize,
+}
+
+/// An undirected edge, smaller node first.
+#[inline(always)]
+fn edge(a: usize, b: usize) -> (Node, Node) {
+    if a < b {
+        (a as Node, b as Node)
+    } else {
+        (b as Node, a as Node)
+    }
 }
 
 /// The descent checks the deadline after this many queue pops (a single
-/// descent from the start tour can take long on large inputs).
-const POPS_PER_DEADLINE_CHECK: u32 = 1024;
+/// descent from the start tour can take long on large inputs, and one LK
+/// step can take tens of microseconds).
+const POPS_PER_DEADLINE_CHECK: u32 = 32;
 
 impl<'a> Opt<'a> {
     fn new(dists: &'a DistMatrix, nn: &'a Neighbours, tour: Vec<Node>) -> Self {
@@ -413,6 +452,7 @@ impl<'a> Opt<'a> {
             queued: vec![false; n],
             journal: Vec::new(),
             pops: 0,
+            lk: LkState::default(),
         };
         opt.reset_positions();
         opt
@@ -536,7 +576,13 @@ impl<'a> Opt<'a> {
     /// Rolls the tour back to the last accepted state.
     fn undo(&mut self) {
         self.clear_queue();
-        while let Some(op) = self.journal.pop() {
+        self.rollback(0);
+    }
+
+    /// Undoes the journaled changes past the first `keep`, newest first.
+    fn rollback(&mut self, keep: usize) {
+        while self.journal.len() > keep {
+            let op = self.journal.pop().expect("longer than keep");
             match op {
                 Undo::Reverse { start, len } => reverse_positions(
                     &mut self.tour,
@@ -689,6 +735,148 @@ impl<'a> Opt<'a> {
         0
     }
 
+    /// Lin-Kernighan step from base node `t1`, built from journaled flips.
+    ///
+    /// For each tour neighbour `t2` of `t1`, the edge `t1-t2` is treated as
+    /// removed, leaving a Hamiltonian path with ends `t1` and `t2`. Each
+    /// level adds an edge `t2-t3` to a near neighbour `t3` and removes the
+    /// edge `t3-t4` (`t4` the neighbour of `t3` on the `t2` side) that makes
+    /// the path Hamiltonian again; `t4` becomes the new free end. On the array
+    /// this is one `flip`, after which `t1-t4` is a tour edge, so the tour is
+    /// valid after every level and closing the move costs `d(t4, t1)`.
+    ///
+    /// Partial gains must stay positive (the neighbour lists are sorted, so
+    /// the scan stops at the first that fails), an edge removed in this step
+    /// is never added back and an edge added is never removed. The first
+    /// levels try up to `LK_BREADTH[level]` choices of `t3` (backtracking),
+    /// deeper ones only the best, up to `LK_MAX_DEPTH` flips. The step keeps
+    /// the prefix with the best closed gain and rolls the journal back past
+    /// it, so tentative flips leave no trace.
+    ///
+    /// Applies the move and returns its gain if it is strictly positive (so
+    /// zero-gain moves can never cycle), activating the ends of every changed
+    /// edge. Otherwise returns 0 with the tour and journal as they were.
+    fn lk_from(&mut self, t1: usize) -> i64 {
+        if self.n() < 5 {
+            return 0;
+        }
+        for t2 in [self.succ(t1), self.pred(t1)] {
+            let start = self.journal.len();
+            let lk = &mut self.lk;
+            lk.steps.clear();
+            lk.added.clear();
+            lk.removed.clear();
+            lk.removed.push(edge(t1, t2));
+            lk.best_gain = 0;
+            lk.best_len = 0;
+            lk.best_journal = start;
+            if self.lk_deepen(t1, t2, self.dists.get(t1, t2), 0) {
+                self.rollback(self.lk.best_journal);
+                self.push(t1);
+                self.push(t2);
+                for i in 0..self.lk.best_len {
+                    let (t3, t4) = self.lk.steps[i];
+                    self.push(t3 as usize);
+                    self.push(t4 as usize);
+                }
+                return self.lk.best_gain;
+            }
+            debug_assert_eq!(self.journal.len(), start);
+        }
+        0
+    }
+
+    /// One level of `lk_from`: `t1-t2` is the open (virtual) edge and `g`
+    /// the gain so far without closing. Returns true once an improving prefix
+    /// was found, leaving its flips (and possibly more) applied; otherwise
+    /// rolls its flips back and returns false.
+    fn lk_deepen(&mut self, t1: usize, t2: usize, g: i64, level: usize) -> bool {
+        let (dists, nn) = (self.dists, self.nn);
+        let d = |a: usize, b: usize| dists.get(a, b);
+        // Walking the tour from t1 to t2 defines the orientation.
+        let forward = self.succ(t1) == t2;
+        let succ2 = if forward {
+            self.succ(t2)
+        } else {
+            self.pred(t2)
+        };
+        let breadth = LK_BREADTH.get(level).copied().unwrap_or(1);
+
+        // The best `breadth` candidates by d(t3, t4) - d(t2, t3), best first.
+        let mut cands = [(0_i64, 0 as Node, 0 as Node); LK_MAX_BREADTH];
+        let mut num = 0;
+        for &t3 in nn.of(t2) {
+            let t3 = t3 as usize;
+            let d23 = d(t2, t3);
+            // Positive gain criterion. Later neighbours are even further away.
+            if g - d23 <= 0 {
+                break;
+            }
+            if t3 == t1 || t3 == succ2 {
+                continue;
+            }
+            let t4 = if forward {
+                self.pred(t3)
+            } else {
+                self.succ(t3)
+            };
+            let score = d(t3, t4) - d23;
+            if num == breadth && score <= cands[num - 1].0 {
+                continue;
+            }
+            if self.lk.removed.contains(&edge(t2, t3)) || self.lk.added.contains(&edge(t3, t4)) {
+                continue;
+            }
+            let mut i = num.min(breadth - 1);
+            while i > 0 && cands[i - 1].0 < score {
+                cands[i] = cands[i - 1];
+                i -= 1;
+            }
+            cands[i] = (score, t3 as Node, t4 as Node);
+            num = (num + 1).min(breadth);
+        }
+
+        for &(score, t3, t4) in &cands[..num] {
+            let (t3, t4) = (t3 as usize, t4 as usize);
+            let mark = self.journal.len();
+            // Removes t1-t2 and t4-t3, adds t2-t3 and t4-t1.
+            self.flip(t1, t2, t3);
+            let lk = &mut self.lk;
+            lk.steps.push((t3 as Node, t4 as Node));
+            lk.added.push(edge(t2, t3));
+            lk.removed.push(edge(t3, t4));
+            let g = g + score;
+            let closed = g - d(t4, t1);
+            if closed > lk.best_gain {
+                lk.best_gain = closed;
+                lk.best_len = lk.steps.len();
+                lk.best_journal = self.journal.len();
+            }
+            if level + 1 < LK_MAX_DEPTH {
+                self.lk_deepen(t1, t4, g, level + 1);
+            }
+            if self.lk.best_gain > 0 {
+                return true;
+            }
+            self.rollback(mark);
+            let lk = &mut self.lk;
+            lk.steps.pop();
+            lk.added.pop();
+            lk.removed.pop();
+        }
+        false
+    }
+
+    /// `improve` from both tour edges of `v`.
+    fn improve_both(&mut self, v: usize) -> i64 {
+        let gain = self.improve::<true>(v);
+        if gain > 0 {
+            gain
+        } else {
+            self.improve::<false>(v)
+        }
+    }
+
     /// Applies improving moves around active nodes until none is left (or
     /// the budget runs out). Returns the total gain.
     fn descend(&mut self, budget: &Budget<'_>) -> i64 {
@@ -701,12 +889,10 @@ impl<'a> Opt<'a> {
                 self.clear_queue();
                 break;
             }
-            let gain = self.improve::<true>(v);
-            total += if gain > 0 {
-                gain
-            } else {
-                self.improve::<false>(v)
-            };
+            // LK first; the 2-opt/3-opt moves (in particular the pure
+            // segment moves, which LK cannot express) only when it fails.
+            let gain = self.lk_from(v);
+            total += if gain > 0 { gain } else { self.improve_both(v) };
         }
         total
     }
@@ -1103,6 +1289,199 @@ mod tests {
                     opt.journal.clear();
                 }
             }
+        }
+    }
+
+    #[test]
+    fn between_matches_a_walk_along_the_cycle() {
+        for n in 1..=7 {
+            let d = euclidean(n, n as u64);
+            let nn = Neighbours::new(&d, &Budget::unlimited());
+            // With the identity tour, node v sits at position v.
+            let opt = Opt::new(&d, &nn, nodes(n));
+            for a in 0..n {
+                for c in 0..n {
+                    // Positions visited walking forward from a to c.
+                    let mut on_path = vec![false; n];
+                    let mut i = a;
+                    loop {
+                        on_path[i] = true;
+                        if i == c {
+                            break;
+                        }
+                        i = next(i, n);
+                    }
+                    for (b, &expected) in on_path.iter().enumerate() {
+                        assert_eq!(opt.between(a, b, c), expected, "n={n} a={a} b={b} c={c}");
+                        assert_eq!(opt.between_dir::<false>(c, b, a), expected);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lk_step_gains_what_it_claims() {
+        for (n, seed) in [(5, 1), (6, 2), (9, 3), (30, 4), (200, 5)] {
+            let d = euclidean(n, seed);
+            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut tour = nodes(n);
+            rng.shuffle(&mut tour);
+            let mut opt = Opt::new(&d, &nn, tour);
+            let mut improved = 0;
+            for _ in 0..3 {
+                for t1 in 0..n {
+                    let before_tour = opt.tour.clone();
+                    let before = cost(&d, &opt.tour);
+                    let mark = opt.journal.len();
+                    let gain = opt.lk_from(t1);
+                    assert!(gain >= 0);
+                    assert!(is_valid(&opt.tour));
+                    assert!(positions_match(&opt.tour, &opt.position));
+                    assert_eq!(cost(&d, &opt.tour), before - gain);
+                    if gain == 0 {
+                        // A failed step leaves no trace.
+                        assert_eq!(opt.tour, before_tour);
+                        assert_eq!(opt.journal.len(), mark);
+                        assert!(opt.queue.is_empty());
+                        continue;
+                    }
+                    improved += 1;
+                    // Every changed edge has both ends activated.
+                    let old = edge_list(&before_tour);
+                    for e in edge_list(&opt.tour) {
+                        if old.binary_search(&e).is_err() {
+                            assert!(opt.queued[e.0 as usize] && opt.queued[e.1 as usize]);
+                        }
+                    }
+                    // The journal restores the old tour exactly, and the
+                    // step is deterministic.
+                    let after = opt.tour.clone();
+                    opt.rollback(mark);
+                    assert_eq!(opt.tour, before_tour);
+                    assert!(positions_match(&opt.tour, &opt.position));
+                    assert_eq!(opt.lk_from(t1), gain);
+                    assert_eq!(opt.tour, after);
+                    opt.clear_queue();
+                }
+            }
+            assert!(n < 9 || improved > 0);
+        }
+    }
+
+    /// The tour as a sorted list of undirected edges.
+    fn edge_list(tour: &[Node]) -> Vec<(Node, Node)> {
+        let n = tour.len();
+        let mut e: Vec<_> = (0..n)
+            .map(|i| edge(tour[i] as usize, tour[next(i, n)] as usize))
+            .collect();
+        e.sort_unstable();
+        e
+    }
+
+    /// The queue descent with 2-opt and 3-opt moves only (no LK steps).
+    fn descend_without_lk(opt: &mut Opt<'_>) -> i64 {
+        let mut total = 0;
+        while let Some(v) = opt.queue.pop_front() {
+            opt.queued[v as usize] = false;
+            total += opt.improve_both(v as usize);
+        }
+        total
+    }
+
+    #[test]
+    fn lk_descent_beats_two_and_three_opt() {
+        let d = euclidean(300, 13);
+        let nn = Neighbours::new(&d, &Budget::unlimited());
+        let mut start = nodes(300);
+        fastrand::Rng::with_seed(3).shuffle(&mut start);
+
+        let mut opt = Opt::new(&d, &nn, start.clone());
+        opt.activate_all();
+        descend_without_lk(&mut opt);
+        let three = cost(&d, &opt.tour);
+
+        let mut opt = Opt::new(&d, &nn, start);
+        opt.activate_all();
+        opt.descend(&Budget::unlimited());
+        assert!(is_valid(&opt.tour));
+        assert!(cost(&d, &opt.tour) < three);
+    }
+
+    #[test]
+    fn descent_stops_when_time_is_up() {
+        use std::time::{Duration, Instant};
+        let d = euclidean(1000, 21);
+        let nn = Neighbours::new(&d, &Budget::unlimited());
+        let mut tour = nodes(1000);
+        fastrand::Rng::with_seed(5).shuffle(&mut tour);
+        let before = cost(&d, &tour);
+        let mut opt = Opt::new(&d, &nn, tour);
+        opt.activate_all();
+        let past = Instant::now() - Duration::from_secs(2);
+        let gain = opt.descend(&Budget::new(past, 1.0).unwrap());
+        // At most one check interval of work, the queue is reset, and the
+        // gain is exact.
+        assert!(opt.queue.is_empty());
+        assert!(opt.queued.iter().all(|&q| !q));
+        assert!(is_valid(&opt.tour));
+        assert!(positions_match(&opt.tour, &opt.position));
+        assert_eq!(cost(&d, &opt.tour), before - gain);
+    }
+
+    /// Compares the first local optimum from the greedy tour, 2-opt + 3-opt
+    /// against the descent with LK, on benchmark cases (run from the repo
+    /// root): `CASES=pcb442,fnl4461 cargo test --release first_local_optimum
+    /// -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn first_local_optimum() {
+        use std::time::Instant;
+        let names = std::env::var("CASES").unwrap_or_else(|_| "pcb442".into());
+        for name in names.split(',') {
+            let text = std::fs::read_to_string(format!("cases/{name}.txt")).unwrap();
+            let mut nums = text.split_whitespace().map(|t| t.parse::<f64>().unwrap());
+            let opt_cost = nums.next().unwrap();
+            let _naive = nums.next().unwrap();
+            let n = nums.next().unwrap() as usize;
+            let pts: Vec<(f64, f64)> = (0..n)
+                .map(|_| (nums.next().unwrap(), nums.next().unwrap()))
+                .collect();
+            let rows: Vec<Vec<u16>> = pts
+                .iter()
+                .map(|a| {
+                    pts.iter()
+                        .map(|b| (a.0 - b.0).hypot(a.1 - b.1).round() as u16)
+                        .collect()
+                })
+                .collect();
+            let d = super::super::test_utils::matrix(&rows);
+            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let start: Vec<Node> = greedy_nearest_neighbor(&d)
+                .unwrap()
+                .into_iter()
+                .map(|v| v as Node)
+                .collect();
+            let pct = |tour: &[Node]| 100.0 * (cost(&d, tour) as f64 - opt_cost) / opt_cost;
+
+            let mut opt = Opt::new(&d, &nn, start.clone());
+            opt.activate_all();
+            let t = Instant::now();
+            descend_without_lk(&mut opt);
+            let (base, base_ms) = (pct(&opt.tour), t.elapsed().as_secs_f64() * 1e3);
+
+            let mut opt = Opt::new(&d, &nn, start.clone());
+            opt.activate_all();
+            let t = Instant::now();
+            opt.descend(&Budget::unlimited());
+            let (lk, lk_ms) = (pct(&opt.tour), t.elapsed().as_secs_f64() * 1e3);
+            assert!(is_valid(&opt.tour));
+            println!(
+                "{name:10} n={n:5} greedy {:6.2}% | 2-opt+3-opt {base:5.2}% {base_ms:5.2} ms \
+                 | with LK {lk:5.2}% {lk_ms:5.2} ms",
+                pct(&start)
+            );
         }
     }
 
