@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use super::candidates::nearest;
+use super::candidates::candidate_lists;
 use super::greedy::nearest_neighbor_tour;
 #[cfg(test)]
 use super::greedy_nearest_neighbor;
@@ -28,8 +28,16 @@ use super::{Budget, Candidates, DistMatrix, SearchOptions, Tour};
 /// distances (d1291, rl1889) and on fl*. Alpha-nearness lists (LKH style,
 /// pure or mixed with nearest, gated by build cost) and minimum-spanning-
 /// tree neighbours give better tours per kick on clustered instances but
-/// were within noise of these lists in the timed benchmark.
+/// were within noise of these lists in the timed benchmark. With the
+/// subgradient ascent (`Candidates::Alpha` / `Auto`) the lists become these
+/// plus the `ALPHA_LIMIT` alpha-nearest (`Neighbours`); for LK alone that is
+/// again within noise, the alpha lists pay off in moves that scan
+/// `Neighbours::alpha_of`.
 const NEIGH_LIMIT: usize = 20;
+/// How many alpha-nearest neighbours (LKH's `MAX_CANDIDATES`) join the
+/// nearest ones after a subgradient ascent, and the length of
+/// `Neighbours::alpha_of`.
+const ALPHA_LIMIT: usize = 5;
 /// Width of the window that the global kick shuffles.
 const GEO_SHUFFLE_WIDTH: usize = 30;
 
@@ -126,28 +134,44 @@ fn prev(i: usize, n: usize) -> usize {
     if i == 0 { n - 1 } else { i - 1 }
 }
 
-/// For each node, its `k` closest other nodes, closest first, stored in
-/// one flat buffer. Ties go to the lowest index.
+/// Candidate neighbours of every node, stored in flat buffers.
+///
+/// `of(v)` is the main list, sorted by (distance, index) so that a scan can
+/// stop at the first candidate that is too far away: the `NEIGH_LIMIT`
+/// nearest neighbours, and after a subgradient ascent (`Candidates::Alpha`,
+/// or `Auto` when it fits the budget) also the `ALPHA_LIMIT` alpha-nearest
+/// (see `candidates`), padded with further nearest neighbours to a common
+/// length of at most `NEIGH_LIMIT + ALPHA_LIMIT`. It therefore always
+/// contains the plain nearest lists.
+///
+/// `alpha_of(v)` is the short alpha-ordered list (smallest alpha first), for
+/// moves that want LKH's five candidates. Without an ascent it holds the
+/// `ALPHA_LIMIT` nearest neighbours, so callers need no special case.
 struct Neighbours {
     k: usize,
     data: Vec<Node>,
+    ka: usize,
+    alpha: Vec<Node>,
 }
 
 impl Neighbours {
-    /// O(n^2), on up to `threads` threads. Returns `None` if the budget
-    /// runs out (deadline or interrupt) before the lists are complete.
+    /// O(n^2), on up to `threads` threads, plus the ascent when the mode
+    /// and the budget call for it (see `candidates::ascent_plan`). Returns
+    /// `None` if the budget runs out (deadline or interrupt) before the
+    /// nearest lists are complete; later, it falls back to them.
     fn build(
         dists: &DistMatrix,
         budget: &Budget<'_>,
         threads: usize,
         candidates: Candidates,
     ) -> Option<Self> {
-        let k = NEIGH_LIMIT.min(dists.len().saturating_sub(1));
-        match candidates {
-            Candidates::Auto | Candidates::Nearest | Candidates::Alpha => {
-                nearest(dists, k, budget, threads).map(|data| Self { k, data })
-            }
-        }
+        let lists = candidate_lists(dists, budget, threads, candidates, NEIGH_LIMIT, ALPHA_LIMIT)?;
+        Some(Self {
+            k: lists.k,
+            data: lists.data,
+            ka: lists.ka,
+            alpha: lists.alpha,
+        })
     }
 
     /// `build` on one thread with nearest neighbours, for tests with a
@@ -160,6 +184,14 @@ impl Neighbours {
     #[inline(always)]
     fn of(&self, node: usize) -> &[Node] {
         &self.data[node * self.k..(node + 1) * self.k]
+    }
+
+    /// The (up to) `ALPHA_LIMIT` alpha-nearest neighbours of `node`,
+    /// smallest alpha first; the nearest when no ascent ran.
+    #[inline(always)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn alpha_of(&self, node: usize) -> &[Node] {
+        &self.alpha[node * self.ka..(node + 1) * self.ka]
     }
 }
 
@@ -1414,7 +1446,42 @@ mod tests {
         let nn = Neighbours::new(&d, &Budget::unlimited());
         for i in 0..5 {
             assert_eq!(nn.of(i).len(), 4);
+            assert_eq!(nn.alpha_of(i).len(), 4);
         }
+    }
+
+    #[test]
+    fn alpha_neighbours_extend_the_nearest_ones() {
+        let d = euclidean(300, 4);
+        let near = Neighbours::new(&d, &Budget::unlimited());
+        let alpha = Neighbours::build(&d, &Budget::unlimited(), 2, Candidates::Alpha).unwrap();
+        assert!(alpha.k >= NEIGH_LIMIT && alpha.k <= NEIGH_LIMIT + ALPHA_LIMIT);
+        for i in 0..300 {
+            // Without an ascent `alpha_of` is the start of the nearest list.
+            assert_eq!(near.alpha_of(i), &near.of(i)[..ALPHA_LIMIT]);
+            // With one, the main list holds the nearest and the alpha lists
+            // and stays sorted by distance.
+            let row = alpha.of(i);
+            assert_eq!(alpha.alpha_of(i).len(), ALPHA_LIMIT);
+            assert!(near.of(i).iter().all(|j| row.contains(j)));
+            assert!(alpha.alpha_of(i).iter().all(|j| row.contains(j)));
+            assert!(
+                row.windows(2)
+                    .all(|w| (d.get(i, w[0] as usize), w[0]) < (d.get(i, w[1] as usize), w[1]))
+            );
+        }
+        // The search runs on the longer lists.
+        let start: Vec<Node> = greedy_nearest_neighbor(&d)
+            .unwrap()
+            .into_iter()
+            .map(|v| v as Node)
+            .collect();
+        let shared = SharedBest::new(cost(&d, &start), start.clone());
+        let budget = Budget::new(std::time::Instant::now(), 0.2).unwrap();
+        let mut rng = fastrand::Rng::with_seed(3);
+        search(&d, &alpha, &shared, &budget, &mut rng, true);
+        assert!(shared.cost() < cost(&d, &start));
+        assert_eq!(shared.cost(), cost(&d, &shared.into_tour()));
     }
 
     #[test]
