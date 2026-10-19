@@ -115,11 +115,19 @@ candidate neighbours. :pyt:`candidates` chooses how those lists are built:
 * :pyt:`'nearest'`: the nearest neighbours of each node. Cheap to build.
 * :pyt:`'alpha'`: LKH-style alpha-nearness. A minimum 1-tree with
   subgradient-optimised node penalties ranks neighbours by how likely their
-  edge is to be in an optimal tour. The preprocessing costs time up front
-  (seconds for several thousand nodes) but improves the tours found per second
-  on large problems.
-* :pyt:`'auto'` (default): the alpha lists when the preprocessing fits
-  comfortably in the budget, otherwise the nearest neighbours.
+  edge is to be in an optimal tour, and the local search then uses a deeper
+  Lin-Kernighan step (a sequential 3-opt basis move, as in LKH) over the five
+  best-ranked candidates of each node. The full subgradient ascent takes
+  about 0.2 s for 1000 nodes and 2 s for 4500 nodes on one thread (it is
+  capped at half the budget), and pays off on problems of more than a few
+  hundred nodes.
+* :pyt:`'auto'` (default): a shortened ascent that fits in about a tenth of
+  the budget, or the nearest neighbours when not even a short one fits. With
+  the default 2 second budget that means alpha lists for every TSPLIB
+  instance up to 4461 nodes; with 0.2 seconds, up to about 1800 nodes.
+
+Forcing :pyt:`'alpha'` on a short budget spends up to half of it on the
+preprocessing, and :pyt:`'nearest'` is what versions up to 0.2.1 used.
 
 .. code-block:: python
 

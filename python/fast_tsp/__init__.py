@@ -190,10 +190,12 @@ def find_tour(
             ``'nearest'`` uses the nearest neighbours of each node.
             ``'alpha'`` always runs the LKH-style preprocessing (minimum
             1-tree with subgradient-optimised node penalties) that ranks
-            neighbours by how likely their edge is to be in an optimal tour;
-            it costs time up front but improves the tours found per second
-            on large problems. ``'auto'`` (default) runs that preprocessing
-            only when it fits comfortably in the time budget.
+            neighbours by how likely their edge is to be in an optimal tour,
+            and lets the search use a deeper Lin-Kernighan step over those
+            candidates. It costs time up front (seconds for several thousand
+            nodes) but finds better tours per second on problems of more
+            than a few hundred nodes. ``'auto'`` (default) runs that
+            preprocessing only when it fits comfortably in the time budget.
         stop_when_converged: If True, the search returns before the deadline
             once it has gone ``max(100_000, 500 * n)`` perturbations without
             improving the best tour. Off by default, so the solver keeps

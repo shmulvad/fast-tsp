@@ -8,9 +8,13 @@ finds near-optimal tours within a time budget you choose.
 Problems of up to 20 nodes are solved exactly with the Held-Karp dynamic
 program. Larger problems use an iterated local search: a nearest-neighbour
 start tour is improved with a Lin-Kernighan style variable-depth move (with
-2-opt and 3-opt as fallback) restricted to each node's 20 nearest neighbours,
+2-opt and 3-opt as fallback) restricted to each node's candidate neighbours,
 and then repeatedly perturbed with small double-bridge kicks and re-optimised
-around the change. Only the nodes touched by a kick are re-examined, so each
+around the change. The candidates are the 20 nearest neighbours, and when the
+budget allows it also LKH's alpha-nearest neighbours, ranked with a minimum
+1-tree after a subgradient ascent on node penalties; with those lists the
+variable-depth move is built from sequential 3-opt moves instead of 2-opt
+flips, which is what closes most of the gap to LKH on large instances. Only the nodes touched by a kick are re-examined, so each
 kick costs work proportional to the change rather than to the problem size,
 and a walk that stops improving is restarted from a perturbed copy of the best
 tour. Several threads can search together and share the best tour.

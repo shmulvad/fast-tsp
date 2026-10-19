@@ -29,7 +29,9 @@ pub enum Candidates {
     /// The nearest neighbours of each node.
     Nearest,
     /// Alpha-nearness lists (minimum 1-tree with subgradient-optimised node
-    /// penalties, as in LKH), whatever the budget.
+    /// penalties, as in LKH), whatever the budget. With these lists the
+    /// local search also uses a deeper step, Lin-Kernighan with a
+    /// sequential 3-opt basis move over the five alpha-nearest candidates.
     Alpha,
 }
 
