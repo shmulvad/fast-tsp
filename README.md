@@ -63,6 +63,19 @@ $ cargo run --release --example bench -- --time 0.1,2,10 --threads 1,4 --repeats
 $ cargo run --release --example bench -- --help
 ```
 
+Pass `--seed <s>` to make the random choices repeatable (repeat `r` uses seed `s + r`); the deadline is still wall-clock time, so totals still move by a few tenths between runs.
+
+Total score over the 73 instances (maximum 73) on an Apple M5 Pro, seed 1, before and after the local search was rewritten around a don't-look-bit queue, a Lin-Kernighan step, local kicks and walk restarts (the "before" column is the previous 2-opt/3-opt iterated local search):
+
+| budget | 1 thread, before → after | 4 threads, before → after |
+|--------|--------------------------|---------------------------|
+| 0.2 s  | 69.22 → 71.84 | 70.01 → 72.16 |
+| 2 s    | 71.06 → 72.57 | 71.35 → 72.78 |
+| 10 s   | 71.36 → 72.87 | 71.38 → 72.96 |
+| 30 s   | 71.45 → 72.96 | 71.57 → 72.97 |
+
+On the two largest instances checked in `cases/large/` the scores went from 0.86–0.89 to 0.98–1.00 (rl5915) and from 0.60–0.69 to 0.93–0.98 (usa13509) at 2 s and 10 s.
+
 ### Citation
 
 If you find that this project helps your research, please consider citing it using the metadata from the `CITATION.cff` file.
