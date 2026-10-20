@@ -7,7 +7,7 @@
 [![GitHub license](https://img.shields.io/github/license/shmulvad/fast-tsp?style=flat-square)][LICENSE]
 
 
-A library for computing near optimal solution to large instances of the TSP (Travelling Salesman Problem) fast using a local solver. The core is written in Rust and provides Python bindings.
+A library for computing near-optimal solutions to large instances of the TSP (Travelling Salesman Problem) fast, using a local search. The core is written in Rust and provides Python bindings. It is a heuristic: on the TSPLIB instances it returns the optimal tour for most instances below 1000 nodes within 2 seconds and stays within a few tenths of a percent of the optimum on instances of several thousand nodes, but it cannot prove a tour optimal (use [Concorde](https://www.math.uwaterloo.ca/tsp/concorde.html) if you need that). See the [comparisons](https://fast-tsp.readthedocs.io/en/latest/comparisons.html) against OR-Tools, LKH-3 and other packages.
 
 # Quickstart
 
@@ -75,6 +75,12 @@ Total score over the 73 instances (maximum 73) on an Apple M5 Pro, seed 1, befor
 | 30 s   | 71.45 → 72.96 | 71.57 → 72.97 |
 
 On the two largest instances checked in `cases/large/` the scores went from 0.86–0.89 to 0.98–1.00 (rl5915) and from 0.60–0.69 to 0.93–0.98 (usa13509) at 2 s and 10 s.
+
+0.2.2 added LKH-style alpha-nearness candidate lists with a deeper Lin-Kernighan step on top of that (`candidates="auto"`), which took the totals to 72.09 / 72.06 at 0.2 s, 72.79 / 72.96 at 2 s, 72.98 / 72.97 at 10 s and 72.99 / 73.00 at 30 s (1 / 4 threads).
+
+### Acknowledgements
+
+The local search re-implements published methods: Lin-Kernighan moves, don't-look bits and neighbour lists (Bentley), double-bridge kicks (Martin, Otto and Felten), and from Keld Helsgaun's [LKH](http://webhotel4.ruc.dk/~keld/research/LKH-3/) the alpha-nearness candidate lists with a subgradient ascent (Helsgaun 2000) and the sequential 3-opt basis move (Helsgaun 2009). No code from LKH is included; see the [About page](https://fast-tsp.readthedocs.io/en/latest/about.html) for the references.
 
 ### Citation
 

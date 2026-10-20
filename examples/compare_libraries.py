@@ -127,7 +127,7 @@ def _solve(solver: str, lib: dict, case_file: str, budget: float, n: int, pts, e
         tour = lib['solve_tsp'](exact, endpoints=(0, 0))
         tour = tour[:-1] if len(tour) == n + 1 else tour
     elif solver == 'frigidum':
-        # The configuration from the StackOverflow answer.
+        # The configuration of frigidum's bundled TSP example.
         lib['tsp'].nodes = pts
         lib['tsp'].nodes_count = n
         lib['tsp'].dist_eu = exact.astype(float)

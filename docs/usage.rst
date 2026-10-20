@@ -4,13 +4,14 @@
 Usage
 =============
 
-This is a short description of how to use the :pyt:`fast-tsp` module.
+This page describes how to use the :pyt:`fast_tsp` module.
 
 
 Installation
 #############
 
-The module can be installed using pip:
+The module can be installed using pip; prebuilt wheels exist for Linux, macOS
+and Windows, so no Rust toolchain is needed:
 
 .. code-block:: bash
 
@@ -21,49 +22,59 @@ numpy arrays, which are read directly without per-element conversion. To
 install numpy alongside, use :pyt:`pip install "fast-tsp[numpy]"`.
 
 
-Example usage
-##############
+The distance matrix
+####################
 
-The program works on a distance matrix. The distance matrix should be a square,
-symmetric 2D matrix of integers, so the distance from :pyt:`i` to :pyt:`j` must
-equal the distance from :pyt:`j` to :pyt:`i`. The heuristic used for more than
-20 nodes relies on this and will not find good tours for asymmetric matrices.
-Note that the distance matrix should satisfy the
-triangle inequality, otherwise the results might not make sense. For most
-real-world problems, this inequality is satisfied. Note that for speed reasons,
-this module requires the distance matrix to be integers. If you have a use-case
-that requires floating point arithmetic, you can scale the distance matrix
-up (multiplying by some given number that is aligned with the level of accuracy you want) and then round to the nearest integer.
+The solver works on a distance matrix: a square 2D matrix of integers where
+entry :pyt:`[i][j]` is the distance from node :pyt:`i` to node :pyt:`j`. It
+must be
+
+* **symmetric**: the distance from :pyt:`i` to :pyt:`j` equals the distance
+  from :pyt:`j` to :pyt:`i`. The heuristic used for more than 20 nodes relies on
+  this and will not find good tours for asymmetric matrices.
+* **integer**, between 0 and 65535 (the range of an unsigned 16-bit integer),
+  with zeros on the diagonal. If your distances are floating point, scale them
+  up to the precision you need and round to the nearest integer; if they are
+  larger than 65535, scale them down. The tour only depends on the relative
+  distances, so a common scale factor changes nothing.
+* ideally **metric**, i.e. satisfy the triangle inequality. The solver works
+  on any symmetric matrix, but its candidate lists and moves are designed for
+  distances that behave like distances, and the quality of the tours degrades
+  on matrices that do not.
+
+:pyt:`is_valid_dist_matrix(dists)` checks these requirements and returns a
+message describing the first problem it finds, or :pyt:`None`.
 
 
-I don't have a distance matrix, but I have 2D coordinates
-##############################################################
+From coordinates to a distance matrix
+######################################
 
-If you have a list of 2D coordinates, you can use `sklearn` to generate this
-matrix for various distance functions using `pairwise_distances`.
+If you have 2D coordinates rather than a distance matrix, build it with numpy
+or scipy. Rounding to the nearest integer is the convention TSPLIB uses for
+Euclidean instances:
 
 .. code-block:: python
 
     import numpy as np
-    from sklearn.metrics import pairwise_distances
-    coords = np.round(np.random.rand(1500, 2) * 100)
-    print(coords[:3].astype(np.int64))
-    # [[81, 32],
-    #  [23, 32],
-    #  [57,  6]]
+    from scipy.spatial.distance import cdist
 
-    dists = np.rint(pairwise_distances(coords)).astype(np.int64)
+    coords = np.random.rand(1500, 2) * 1000
+    dists = np.rint(cdist(coords, coords)).astype(np.int64)
     print(dists[:3, :3])
-    # [[ 0, 58, 35],
-    #  [58,  0, 42],
-    #  [35, 42,  0]]
+    # [[  0, 581, 352],
+    #  [581,   0, 427],
+    #  [352, 427,   0]]
+
+:pyt:`cdist` takes a :pyt:`metric` argument for other distances (for example
+:pyt:`'cityblock'`), and :pyt:`sklearn.metrics.pairwise_distances` does the
+same job. For geographic coordinates, compute great-circle distances in
+metres, or in tens of metres if they would exceed 65535.
 
 
+Finding a tour
+###############
 
-How to run main module
-########################
-
-Once you have a distance matrix, it is very easy to run the module:
+Once you have a distance matrix, finding a tour is one call:
 
 .. code-block:: python
 
@@ -72,10 +83,14 @@ Once you have a distance matrix, it is very easy to run the module:
     print(tour)
     # [0, 52, 1, 9, 22, ...]
 
-The tour is a list of indices that correspond to the order of the nodes in the
-supplied distance matrix. E.g. [0, 52, 1] would imply that the tour starts at
-index 0, goes to the node at index 52, goes to node 1, and finally ends at node
-0 again, closing the tour.
+The tour is a list of indices into the distance matrix, in visiting order,
+starting at node 0. :pyt:`[0, 52, 1]` means the tour starts at node 0, goes to
+node 52, then to node 1, and finally back to node 0 to close the tour. The
+tour is a cycle, so if you need to start somewhere else, rotate the list.
+
+Problems of 20 nodes or fewer are solved exactly and return immediately;
+larger ones run the local search described in :doc:`about` for the time
+budget. :pyt:`compute_cost(tour, dists)` gives the length of a tour.
 
 
 Choosing the time budget
@@ -84,9 +99,10 @@ Choosing the time budget
 :pyt:`duration_seconds` (default 2.0) is a wall-clock budget for the whole
 call, including setup, and the solver keeps looking for a better tour until it
 runs out. As a rule of thumb from the TSPLIB instances (see
-:doc:`comparisons`): a few hundred nodes are solved to optimality or very
-close to it within 0.2 seconds, a few thousand nodes are within about 1 % of
-the optimum after 0.2 seconds and within a few tenths of a percent after
+:doc:`comparisons`): instances of up to about 1000 nodes are solved to
+optimality or within a few tenths of a percent of it in 0.2 seconds and to
+optimality in 2 seconds; instances of 3000–4500 nodes are within about 0.6 %
+of the optimum after 0.2 seconds, 0.2 % after 2 seconds and 0.1 % after
 10 seconds. Larger budgets keep improving the tour slowly. Pressing Ctrl-C
 stops the search and raises :pyt:`KeyboardInterrupt`.
 
@@ -97,13 +113,31 @@ stops the search and raises :pyt:`KeyboardInterrupt`.
 If you would rather get the answer back as soon as the search stops making
 progress, pass :pyt:`stop_when_converged=True`. The solver then returns once
 it has gone :pyt:`max(100_000, 500 * n)` perturbations without improving the
-best tour, which on small problems happens within a second or two. Problems
-of 20 nodes or fewer are solved exactly and return immediately either way,
-and a budget of :pyt:`float('inf')` always stops on convergence.
+best tour, which on small problems happens within a second or two. A budget
+of :pyt:`float('inf')` always stops on convergence.
 
 .. code-block:: python
 
     tour = fast_tsp.find_tour(dists, duration_seconds=30, stop_when_converged=True)
+
+
+Using multiple cores
+#####################
+
+By default the search runs on one thread. Pass :pyt:`max_threads` to let
+several threads search together. They share the best tour found so far, so
+4 threads find tours about as good as 1 thread given 4 times as long. Pass
+:pyt:`None` to use one fewer than the number of available CPU cores:
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=1.0, max_threads=None)
+
+The time limit is the same whatever the number of threads. Problems of 20
+nodes or fewer are solved exactly on one thread, and :pyt:`max_threads` is
+never allowed to exceed the number of available cores. If you are already
+solving many problems in parallel (e.g. with :pyt:`multiprocessing`), keep the
+default of 1.
 
 
 Candidate lists
@@ -136,109 +170,65 @@ TSPLIB instance ``rl5915`` is one), so try it if a result disappoints.
     tour = fast_tsp.find_tour(dists, duration_seconds=10, candidates='alpha')
 
 
-Using multiple cores
-#####################
+Exact solutions
+################
 
-By default the search runs on one thread. Pass :pyt:`max_threads` to let
-several threads search together. They share the best tour found so far, so
-4 threads find tours about as good as 1 thread given 4 times as long. Pass
-:pyt:`None` to use one fewer than the number of available CPU cores:
+:pyt:`solve_tsp_exact(dists)` finds a provably optimal tour with the Held-Karp
+dynamic program, in O(2^n · n^2) time and O(2^n · n) memory. That takes a
+few hundredths of a second and under 100 MB at 20 nodes but doubles with every
+node, which is why :pyt:`find_tour` uses it up to 20 nodes and the heuristic
+above that.
 
-.. code-block:: python
-
-    tour = fast_tsp.find_tour(dists, duration_seconds=1.0, max_threads=None)
-
-The time limit is the same whatever the number of threads. Problems of 20
-nodes or fewer are solved exactly on one thread, and :pyt:`max_threads` is
-never allowed to exceed the number of available cores. If you are already
-solving many problems in parallel (e.g. with :pyt:`multiprocessing`), keep the
-default of 1.
-
-
-
-Help, I'm getting errors when I run the module
-######################################################
-
-If you are getting errors while running the module, make sure you are fulfilling
-the following requirements:
-
-* The distance matrix should be a square 2D matrix of integers.
-* The distance matrix should satisfy the triangle inequality.
-* The distance matrix should be symmetric.
-* The distance matrix should be positive.
-* The distance matrix should be zero on the diagonal.
-* The distance matrix should be less than 2^16 - 1 (the maximum value for an unsigned 16-bit integer).
-
-You can check whether your distance matrix fulfills these requirements by using
-the :pyt:`is_valid_dist_matrix` function. If you are still getting errors,
-please open an issue on the `GitHub page <https://github.com/shmulvad/fast-tsp>`.
+If you need a guaranteed optimum for larger instances, use a dedicated exact
+solver. `Concorde <https://www.math.uwaterloo.ca/tsp/concorde.html>`_ is the
+state of the art: a branch-and-cut code that has solved every TSPLIB instance
+to proven optimality, typically in seconds to minutes for a few thousand nodes
+(it is free for academic research use, and `pyconcorde
+<https://github.com/jvkersch/pyconcorde>`_ wraps it for Python).
+:pyt:`fast_tsp` is a heuristic: on the instances in :doc:`comparisons` it
+returns the optimal tour most of the time, but it cannot tell you that it did.
 
 
+Other helpers
+##############
 
-Exact solution
-###############
-
-If you are running the program on a small problem, you can use the :pyt:`solve_tsp_exact`
-function to get the optimal solution.
-This solves TSP optimally using the bottom-up Held-Karp's algorithm in
-O(2^n * n^2) time. This is tractable for small `n` but quickly becomes
-untractable for `n` even of medium size. This function will also be used in the
-main :pyt:`find_tour` function for problem instances of less than or equal to `n = 20` in size.
-
-
-
-Greedy Nearest Neighbor
-########################
-
-This is the algorithm that is used in the local solver to get an initial solution
-that is then improved upon using iterative local search. If you just desire
-a very rough approximation of the optimal solution, you can use
-:pyt:`greedy_nearest_neighbor`.
-
-
-
-Scoring
-###########
-
-A helper function for computing the cost of a given tour is included. You can
-use this to get an idea of the quality of the returned solution:
+* :pyt:`greedy_nearest_neighbor(dists)` returns the nearest-neighbour tour the
+  local search starts from. On the TSPLIB instances it is 5–40 % (typically
+  25 %) longer than the optimum, and useful as a quick baseline.
+* :pyt:`compute_cost(tour, dists)` returns the length of a tour.
+* :pyt:`is_valid_tour(n, tour)` checks that a tour visits each of the
+  :pyt:`n` nodes exactly once.
+* :pyt:`score_tour(tour, dists, opt_cost)` scores a tour between 0 and 1
+  against a known optimal cost, as the `Kattis TSP problem
+  <https://open.kattis.com/problems/tsp>`_ does: with
+  :math:`d = (actual - opt) / (naive - opt)`, where :math:`naive` is the
+  nearest-neighbour cost, the score is :math:`0.02^{\max(d, 0)}`. It is 1.0
+  for an optimal tour and 0.0 for one no better than the nearest-neighbour
+  tour. (If the nearest-neighbour tour is itself optimal, the score is 1.0
+  for a tour of that cost and 0.0 for anything worse.)
 
 .. code-block:: python
 
     import fast_tsp
-    tour = fast_tsp.find_tour(dists)  # Assume `dists` are defined
-    cost_solver = fast_tsp.compute_cost(tour, dists)
-    print(cost_solver)  # 5984
-    cost_greedy = fast_tsp.compute_cost(fast_tsp.greedy_nearest_neighbor(dists), dists)
-    print(cost_greedy)  # 6812
+    tour = fast_tsp.find_tour(dists)
+    print(fast_tsp.compute_cost(tour, dists))  # 5984
+    print(fast_tsp.compute_cost(fast_tsp.greedy_nearest_neighbor(dists), dists))  # 6812
+    print(fast_tsp.is_valid_tour(len(dists), tour))  # True
 
 
-It can be interesting to know how well a solution performs, taking into account
-the greedy solution and the optimal cost. If you know what the optimal cost is,
-you can use the :pyt:`score_tour` function to get a score for your solution
-(see Validation below).
+Troubleshooting
+################
 
+* **"Invalid distance matrix" errors**: check the requirements listed under
+  *The distance matrix* above with :pyt:`is_valid_dist_matrix`. The most
+  common causes are floating point entries, negative entries, distances above
+  65535 and non-square inputs.
+* **Poor tours**: make sure the matrix is symmetric and that you gave the
+  solver enough time; a few thousand nodes need seconds, not milliseconds.
+  Try :pyt:`max_threads=None`, and :pyt:`candidates='nearest'` or
+  :pyt:`'alpha'` to see whether the candidate lists are the issue.
+* **The call takes the whole budget on a tiny problem**: that is the default
+  since 0.2.2; pass :pyt:`stop_when_converged=True` or a shorter budget.
 
-
-Validation
-###########
-You can check whether a solution is valid by using the :pyt:`is_valid_tour` function.
-A solution is valid if it is visits every node in the graph exactly once.
-If you know what the optimal solution is, you can also score the solution
-using the :pyt:`score_tour` function. This compares the solution to the one
-returned by the greedy nearest neighbor algorithm and then computes the score
-as follows:
-
-
-.. math::
-
-    \begin{align}
-    d = \frac{actual - opt}{naive - opt},
-    \ \ \
-    score = 0.02^{\max(d, 0)}
-    \end{align}
-
-This will be 1.0 if the solution is optimal, 0.0 if it is worse than or equal to
-the naive solution and somewhere in-between for values in between.
-In the special case where the optimal solution is the naive solution, the score
-will be 1.0 if actual is equal to naive, and 0.0 if actual is less than naive.
+If you are still stuck, please open an issue on the
+`GitHub page <https://github.com/shmulvad/fast-tsp>`_.

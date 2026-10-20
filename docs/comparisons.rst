@@ -1,12 +1,19 @@
 Comparisons
 ============
 
-This page compares ``fast-tsp`` with the other Python TSP packages that come up in
-`this StackOverflow thread <https://stackoverflow.com/questions/71196078/scalable-implementation-of-the-travelling-salesman-problem-in-python>`_,
-and with `LKH-3 <http://webhotel4.ruc.dk/~keld/research/LKH-3/>`_, the reference
-heuristic solver, on a few `TSPLIB <http://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/>`_
+This page compares ``fast-tsp`` with the well-known TSP solvers available from
+Python (OR-Tools, python-tsp, tsp-solver2, frigidum and elkai) and with
+`LKH-3 <http://webhotel4.ruc.dk/~keld/research/LKH-3/>`_, the reference heuristic
+solver, on a few `TSPLIB <http://comopt.ifi.uni-heidelberg.de/software/TSPLIB95/>`_
 instances with known optimal tours. The numbers are how far the returned tour is
 above the optimum (0.00 % means the optimal tour was found). Lower is better.
+
+All of these, ``fast-tsp`` included, are heuristics: they return a short tour
+but no proof that it is the shortest. If you need a guaranteed optimum, use an
+exact solver such as `Concorde <https://www.math.uwaterloo.ca/tsp/concorde.html>`_
+(free for academic research use; `pyconcorde <https://github.com/jvkersch/pyconcorde>`_
+wraps it for Python), which solves instances of this size to proven optimality
+in seconds to minutes.
 
 Setup
 #####
@@ -18,8 +25,8 @@ Setup
   with the same matrix.
 * Machine: Apple M5 Pro, one solver running at a time, Python 3.12. Unless noted,
   each solver uses one thread.
-* Each solver is called the way its documentation or the StackOverflow answers
-  show, with the time limit it offers:
+* Each solver is called the way its documentation shows, with the time limit it
+  offers:
 
   - ``fast-tsp`` 0.2.2: ``fast_tsp.find_tour(dists, duration_seconds=t)``, i.e. the
     defaults (``candidates='auto'``, the whole budget is used), and
@@ -40,9 +47,9 @@ Setup
   - `elkai <https://pypi.org/project/elkai/>`_ 2.0.1 (LKH-3 as a Python package,
     ``solve_tsp(runs=1)``), `tsp-solver2 <https://pypi.org/project/tsp-solver2/>`_
     0.4 (``solve_tsp``) and `frigidum <https://pypi.org/project/frigidum/>`_ 0.4
-    (simulated annealing with the parameters from the StackOverflow answer) have
-    no time limit, so they are run once per instance and their wall time is
-    reported instead. ``tsp-c`` from the thread no longer installs.
+    (simulated annealing with the settings of its bundled TSP example) have no
+    time limit, so they are run once per instance and their wall time is
+    reported instead.
 
 Time limits are wall-clock budgets handed to the solver. ``fast-tsp``, OR-Tools and
 python-tsp stayed within a few hundred milliseconds of their budget (OR-Tools needs
