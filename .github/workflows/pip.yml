@@ -2,6 +2,12 @@ name: "Pip"
 
 on:
   workflow_dispatch:
+    inputs:
+      matrix:
+        description: "Which jobs to run: the full platform x Python matrix, or a minimal set (Rust checks, no-numpy, one source build on Ubuntu / Python 3.12)"
+        type: choice
+        options: [full, minimal]
+        default: full
   pull_request:
   push:
     branches:
@@ -50,9 +56,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     strategy:
       fail-fast: false
+      # `inputs.matrix` is empty for push and pull_request events, which run the full matrix.
       matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]
+        platform: ${{ fromJSON(inputs.matrix == 'minimal' && '["ubuntu-latest"]' || '["macos-latest", "ubuntu-latest", "windows-latest"]') }}
+        python-version: ${{ fromJSON(inputs.matrix == 'minimal' && '["3.12"]' || '["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t", "3.15", "3.15t"]') }}
     steps:
     - uses: actions/checkout@v6
     - uses: dtolnay/rust-toolchain@stable
