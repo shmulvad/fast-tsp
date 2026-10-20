@@ -1,7 +1,13 @@
+.. role:: pyt(code)
+   :language: python
+
 fast-tsp
 ============================
 
 A fast local-search solver for the TSP (Travelling Salesman Problem), written in Rust with Python bindings.
+Give it a symmetric integer distance matrix and a time budget, and it returns a near-optimal tour:
+optimal on most TSPLIB instances below 1000 nodes within a second or two, and within a few tenths
+of a percent of the optimum on instances of several thousand nodes.
 
 .. image:: https://readthedocs.org/projects/fast-tsp/badge/?version=latest
    :target: https://fast-tsp.readthedocs.io/en/latest/?badge=latest
@@ -24,7 +30,7 @@ A fast local-search solver for the TSP (Travelling Salesman Problem), written in
    :alt: Issues
 
 
-Quickstart:
+Quickstart
 #############
 
 Install the module:
@@ -50,8 +56,10 @@ Create a distance matrix and run the solver:
    # [0, 1, 3, 2]
 
 The returned tour is the list of indices of the nodes in the order they are visited.
+:pyt:`find_tour` takes a time budget (``duration_seconds``, default 2), a thread count
+(``max_threads``) and two tuning options; see :doc:`usage`.
 
-Contents:
+Contents
 ##########
 
 .. toctree::

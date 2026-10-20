@@ -4,7 +4,9 @@
 //! the best tour and walking from any tour within a small slack of it.
 //! A walk that stops improving restarts from a perturbed best tour.
 //! Every step costs time proportional to the work it causes, not to the
-//! tour length.
+//! tour length. The search runs until the deadline unless
+//! `SearchOptions::stop_when_converged` lets it return once it has gone a
+//! long time without a better tour.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -12,11 +14,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
 
-use super::candidates::nearest;
+use super::candidates::candidate_lists;
 use super::greedy::nearest_neighbor_tour;
 #[cfg(test)]
 use super::greedy_nearest_neighbor;
-use super::{Budget, DistMatrix, Tour};
+use super::{Budget, Candidates, DistMatrix, SearchOptions, Tour};
 
 /// How many nearest neighbours each node considers in 2-opt, 3-opt and LK.
 ///
@@ -26,8 +28,16 @@ use super::{Budget, DistMatrix, Tour};
 /// distances (d1291, rl1889) and on fl*. Alpha-nearness lists (LKH style,
 /// pure or mixed with nearest, gated by build cost) and minimum-spanning-
 /// tree neighbours give better tours per kick on clustered instances but
-/// were within noise of these lists in the timed benchmark.
+/// were within noise of these lists in the timed benchmark. With the
+/// subgradient ascent (`Candidates::Alpha` / `Auto`) the lists become these
+/// plus the `ALPHA_LIMIT` alpha-nearest (`Neighbours`); for LK alone that is
+/// again within noise, the alpha lists pay off in moves that scan
+/// `Neighbours::alpha_of`.
 const NEIGH_LIMIT: usize = 20;
+/// How many alpha-nearest neighbours (LKH's `MAX_CANDIDATES`) join the
+/// nearest ones after a subgradient ascent, and the length of
+/// `Neighbours::alpha_of`.
+const ALPHA_LIMIT: usize = 5;
 /// Width of the window that the global kick shuffles.
 const GEO_SHUFFLE_WIDTH: usize = 30;
 
@@ -68,7 +78,8 @@ const KICK_SEGMENT_MAX: usize = 200;
 /// out of a basin, but never far from the best tour, so no restarts are
 /// needed. 0 gives the old rule (accept ties with the best).
 const ACCEPT_SLACK_PER_EDGE: f64 = 0.1;
-/// A search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
+/// With `SearchOptions::stop_when_converged` (or without a deadline) a
+/// search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
 /// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour.
 /// Larger instances are bound by the time limit. Before walk restarts (see
 /// `RESTART_KICKS_PER_NODE`) this was 100 per node / 20 000, which ended
@@ -105,6 +116,51 @@ const LK_BREADTH: [usize; 2] = [3, 1];
 const LK_MAX_BREADTH: usize = 3;
 const _: () = assert!(LK_BREADTH[0] <= LK_MAX_BREADTH && LK_BREADTH[1] <= LK_MAX_BREADTH);
 
+/// The improving step `Opt::descend` runs from each active node. Outside
+/// tests only `STEP` is constructed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum Step {
+    /// `lk_from` (Lin-Kernighan on 2-opt flips), then `improve_both` when
+    /// it finds nothing.
+    Lk,
+    /// `lk3_from` (Lin-Kernighan with a sequential 3-opt basis move), then
+    /// `improve_both` when it finds nothing.
+    Lk3,
+    /// `lk3_from` alone. With `LK3_ALPHA = false` its first level already
+    /// tries every move that `improve_both` tries; with the short alpha
+    /// lists it does not, so the fallback matters.
+    Lk3Only,
+}
+/// The step `search` runs. `Lk3` scanning the alpha lists (`LK3_ALPHA`)
+/// is used only when a subgradient ascent produced them (`search` falls
+/// back to `Lk` otherwise: on the five nearest neighbours LK3 is clearly
+/// worse, and on the full nearest lists it is within noise of LK, losing
+/// on d2103 and fl*). With alpha lists LK3 reaches better first local
+/// optima than LK (2.1 % against 3.1 % above optimal, 16 cases, same
+/// time) and gains on the 16-case dev set at 0.2 s and 2 s (seeds 1 and
+/// 11). `Lk3Only` (no `improve` fallback) is much worse on alpha lists.
+const STEP: Step = Step::Lk3;
+/// Maximum number of 3-opt moves in one `lk3_from` step. With alpha lists
+/// a level costs at most 5 x 2 x 5 evaluations, so deep steps are cheap:
+/// dev set (seeds 1 / 11, 0.2 s and 2 s, over LK) depth 12 +0.08 / +0.02
+/// and +0.27 / +0.15, depth 25 +0.15 / +0.15 and +0.15 / +0.13, depth 50
+/// +0.22 / +0.11 and +0.25 / +0.11. (LKH has no limit.)
+const LK3_MAX_DEPTH: usize = 50;
+/// How many continuation moves (best `G4` first) an LK3 step tries at its
+/// first levels before giving up on that level. Deeper levels try one.
+/// LKH also continues with the best move only; on the nearest lists a
+/// second or third choice at the first level was slower and worse.
+const LK3_BREADTH: [usize; 2] = [1, 1];
+const LK3_MAX_BREADTH: usize = 3;
+const _: () = assert!(LK3_BREADTH[0] <= LK3_MAX_BREADTH && LK3_BREADTH[1] <= LK3_MAX_BREADTH);
+/// True: an LK3 level chooses `t3` from `Neighbours::alpha_of(t2)` and `t5`
+/// from `alpha_of(t4)` (LKH's five alpha-nearest, or the five nearest when
+/// no ascent ran), scanning each whole list since it is not sorted by
+/// distance. False: the main lists (`of`), cut at the first candidate that
+/// fails the gain criterion.
+const LK3_ALPHA: bool = true;
+
 /// A node, or an index into the tour. Four bytes instead of `usize` keeps
 /// the tour, positions and neighbour lists compact, which makes the 2-opt
 /// and 3-opt scans noticeably faster on large inputs. A distance matrix
@@ -123,30 +179,72 @@ fn prev(i: usize, n: usize) -> usize {
     if i == 0 { n - 1 } else { i - 1 }
 }
 
-/// For each node, its `k` closest other nodes, closest first, stored in
-/// one flat buffer. Ties go to the lowest index.
+/// Candidate neighbours of every node, stored in flat buffers.
+///
+/// `of(v)` is the main list, sorted by (distance, index) so that a scan can
+/// stop at the first candidate that is too far away: the `NEIGH_LIMIT`
+/// nearest neighbours, and after a subgradient ascent (`Candidates::Alpha`,
+/// or `Auto` when it fits the budget) also the `ALPHA_LIMIT` alpha-nearest
+/// (see `candidates`), padded with further nearest neighbours to a common
+/// length of at most `NEIGH_LIMIT + ALPHA_LIMIT`. It therefore always
+/// contains the plain nearest lists.
+///
+/// `alpha_of(v)` is the short alpha-ordered list (smallest alpha first), for
+/// moves that want LKH's five candidates. Without an ascent it holds the
+/// `ALPHA_LIMIT` nearest neighbours, so callers need no special case.
 struct Neighbours {
     k: usize,
     data: Vec<Node>,
+    ka: usize,
+    alpha: Vec<Node>,
+    /// Whether `alpha` comes from a subgradient ascent.
+    from_ascent: bool,
 }
 
 impl Neighbours {
-    /// O(n^2), on up to `threads` threads. Returns `None` if the budget
-    /// runs out (deadline or interrupt) before the lists are complete.
-    fn build(dists: &DistMatrix, budget: &Budget<'_>, threads: usize) -> Option<Self> {
-        let k = NEIGH_LIMIT.min(dists.len().saturating_sub(1));
-        nearest(dists, k, budget, threads).map(|data| Self { k, data })
+    /// O(n^2), on up to `threads` threads, plus the ascent when the mode
+    /// and the budget call for it (see `candidates::ascent_plan`). Returns
+    /// `None` if the budget runs out (deadline or interrupt) before the
+    /// nearest lists are complete; later, it falls back to them.
+    fn build(
+        dists: &DistMatrix,
+        budget: &Budget<'_>,
+        threads: usize,
+        candidates: Candidates,
+    ) -> Option<Self> {
+        let lists = candidate_lists(dists, budget, threads, candidates, NEIGH_LIMIT, ALPHA_LIMIT)?;
+        Some(Self {
+            k: lists.k,
+            data: lists.data,
+            ka: lists.ka,
+            alpha: lists.alpha,
+            from_ascent: lists.from_ascent,
+        })
     }
 
-    /// `build` on one thread, for tests with a budget that cannot run out.
+    /// `build` on one thread with nearest neighbours, for tests with a
+    /// budget that cannot run out.
     #[cfg(test)]
     fn new(dists: &DistMatrix, budget: &Budget<'_>) -> Self {
-        Self::build(dists, budget, 1).expect("the budget ran out")
+        Self::build(dists, budget, 1, Candidates::Nearest).expect("the budget ran out")
     }
 
     #[inline(always)]
     fn of(&self, node: usize) -> &[Node] {
         &self.data[node * self.k..(node + 1) * self.k]
+    }
+
+    /// The (up to) `ALPHA_LIMIT` alpha-nearest neighbours of `node`,
+    /// smallest alpha first; the nearest when no ascent ran.
+    #[inline(always)]
+    fn alpha_of(&self, node: usize) -> &[Node] {
+        &self.alpha[node * self.ka..(node + 1) * self.ka]
+    }
+
+    /// True if the alpha lists come from a subgradient ascent rather than
+    /// being the start of the nearest lists.
+    fn alpha_ran(&self) -> bool {
+        self.from_ascent
     }
 }
 
@@ -232,9 +330,12 @@ pub(crate) fn local_search(
     budget: &Budget<'_>,
     threads: usize,
     seed: Option<u64>,
+    options: &SearchOptions,
 ) -> Tour {
     let mut rng = seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed);
-    let Some(nn) = Neighbours::build(dists, budget, threads) else {
+    // Without a deadline the convergence rule is the only way to stop.
+    let stop = options.stop_when_converged || budget.deadline().is_none();
+    let Some(nn) = Neighbours::build(dists, budget, threads, options.candidates) else {
         // An interrupted run's tour is discarded; otherwise return the
         // cheapest reasonable tour.
         if budget.check_interrupted().is_err() {
@@ -249,27 +350,27 @@ pub(crate) fn local_search(
     let shared = SharedBest::new(cost(dists, &start), start);
 
     if threads <= 1 {
-        search(dists, &nn, &shared, budget, &mut rng);
+        search(dists, &nn, &shared, budget, &mut rng, stop);
     } else {
-        let stop = AtomicBool::new(false);
+        let stop_flag = AtomicBool::new(false);
         let deadline = budget.deadline();
         thread::scope(|scope| {
             let workers: Vec<_> = (1..threads)
                 .map(|_| {
-                    let (nn, shared, stop) = (&nn, &shared, &stop);
+                    let (nn, shared, stop_flag) = (&nn, &shared, &stop_flag);
                     let mut worker_rng = rng.fork();
                     scope.spawn(move || {
-                        let budget = Budget::worker(deadline, stop);
-                        search(dists, nn, shared, &budget, &mut worker_rng);
+                        let budget = Budget::worker(deadline, stop_flag);
+                        search(dists, nn, shared, &budget, &mut worker_rng, stop);
                     })
                 })
                 .collect();
-            search(dists, &nn, &shared, budget, &mut rng);
+            search(dists, &nn, &shared, budget, &mut rng, stop);
             // This thread may finish first (or be interrupted). Keep polling
             // the callback until the other threads are done.
             while !workers.iter().all(|w| w.is_finished()) {
                 if budget.is_interrupted() {
-                    stop.store(true, Ordering::Relaxed);
+                    stop_flag.store(true, Ordering::Relaxed);
                 }
                 thread::sleep(WAIT_POLL_INTERVAL);
             }
@@ -282,7 +383,7 @@ pub(crate) fn local_search(
 /// and continue from the result if it is within the acceptance slack of the
 /// walk's record (see `ACCEPT_SLACK_PER_EDGE`), restarting the walk from a
 /// perturbed best tour when it stagnates (see `RESTART_KICKS_PER_NODE`).
-/// Stops when the budget is exceeded or after
+/// Stops when the budget is exceeded or, with `stop_when_converged`, after
 /// `max_kicks_without_improvement(n)` perturbations in a row that did not
 /// lead to a better tour (found by this thread or any other).
 ///
@@ -295,13 +396,31 @@ fn search(
     shared: &SharedBest,
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
+    stop_when_converged: bool,
 ) {
-    search_with_slack(dists, nn, shared, budget, rng, ACCEPT_SLACK_PER_EDGE);
+    // LK3 scans the alpha lists; without an ascent they are just the five
+    // nearest neighbours, on which LK3 is weaker than LK.
+    let step = match STEP {
+        Step::Lk3 | Step::Lk3Only if LK3_ALPHA && !nn.alpha_ran() => Step::Lk,
+        step => step,
+    };
+    search_with_slack(
+        dists,
+        nn,
+        shared,
+        budget,
+        rng,
+        ACCEPT_SLACK_PER_EDGE,
+        stop_when_converged,
+        step,
+    );
 }
 
-/// `search` with the acceptance slack as a parameter. Returns the cost of
-/// the tour the walk ended on, which may be worse than the best tour (the
-/// best tour is only ever published to `shared`).
+/// `search` with the acceptance slack and the descent's step as
+/// parameters. Returns the cost of the tour the walk ended on, which may be
+/// worse than the best tour (the best tour is only ever published to
+/// `shared`), and the number of kicks.
+#[allow(clippy::too_many_arguments)]
 fn search_with_slack(
     dists: &DistMatrix,
     nn: &Neighbours,
@@ -309,11 +428,15 @@ fn search_with_slack(
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
     slack_per_edge: f64,
-) -> i64 {
+    stop_when_converged: bool,
+    step: Step,
+) -> (i64, u64) {
     let n = dists.len();
     let mut tour = Vec::with_capacity(n);
     let mut cur_cost = shared.copy_into(&mut tour);
     let mut opt = Opt::new(dists, nn, tour);
+    opt.step = step;
+    let mut kicks: u64 = 0;
 
     // Full descent from the start tour, every node active.
     opt.activate_all();
@@ -330,8 +453,12 @@ fn search_with_slack(
     let mean_edge = (best_cost as f64 / n as f64).max(1.0);
     let slack = (slack_per_edge * mean_edge).round() as i64;
 
-    let max_fails = max_kicks_without_improvement(n);
-    let mut num_iter_no_improvement = 0;
+    let max_fails = if stop_when_converged {
+        max_kicks_without_improvement(n)
+    } else {
+        u32::MAX
+    };
+    let mut num_iter_no_improvement: u32 = 0;
     // The walk's own record and the kicks since it last improved, for the
     // restarts (see `RESTART_KICKS_PER_NODE`). Until the first restart the
     // record is the best tour.
@@ -374,6 +501,7 @@ fn search_with_slack(
         };
         let delta = opt.kick(kick, cur_cost, rng);
         let gain = opt.descend(budget);
+        kicks += 1;
         let cost = cur_cost + delta - gain;
         if cost < best_cost {
             debug_assert_eq!(cost, self::cost(dists, &opt.tour));
@@ -384,7 +512,7 @@ fn search_with_slack(
         } else {
             // Only a strictly better tour resets the counter; otherwise the
             // walk (and its restarts) could keep the search alive forever.
-            num_iter_no_improvement += 1;
+            num_iter_no_improvement = num_iter_no_improvement.saturating_add(1);
         }
         if cost < walk_best {
             walk_best = cost;
@@ -402,7 +530,7 @@ fn search_with_slack(
             opt.undo();
         }
     }
-    cur_cost
+    (cur_cost, kicks)
 }
 
 /// How many kicks in a row without improving the walk's own record make a
@@ -511,6 +639,21 @@ enum Undo {
     Swap(Node, Node),
 }
 
+/// How the nodes of a sequential 3-opt move (`Opt::apply_seq3`) lie, with
+/// `t2` following `t1` (LKH's `Make3OptMove` cases).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Seq3 {
+    /// `t1 t2 .. t4 t3` (t4 before t3) and `t6` on the side of `t5` that
+    /// makes the move valid: two flips (LKH cases 1 and 2).
+    Flips,
+    /// `t1 [t2..t5][t6..t3] t4` -> `t1 [t6..t3][t2..t5] t4`: a pure
+    /// segment move without reversal (LKH case 5).
+    Segment,
+    /// `t1 [t2..t6][t5..t3] t4` -> both segments reversed in place: two
+    /// flips (LKH case 6).
+    InnerFlips,
+}
+
 /// A tour with node positions, a queue of active nodes for the 2-opt/3-opt
 /// descent, and an undo journal.
 struct Opt<'a> {
@@ -528,13 +671,18 @@ struct Opt<'a> {
     pops: u32,
     /// Working state of the current Lin-Kernighan step.
     lk: LkState,
+    /// The step `descend` runs (`STEP`; tests and harnesses override it).
+    step: Step,
+    /// Whether LK3 scans the alpha lists (`LK3_ALPHA`; tests override it).
+    lk3_alpha: bool,
 }
 
-/// Working state of one Lin-Kernighan step (`Opt::lk_from`), kept between
-/// steps so a step allocates nothing.
+/// Working state of one Lin-Kernighan step (`Opt::lk_from` or
+/// `Opt::lk3_from`), kept between steps so a step allocates nothing.
 #[derive(Default)]
 struct LkState {
-    /// `(t3, t4)` of each level of the current step.
+    /// `(t3, t4)` of each level of the current step (LK3: `(t3, t4)` and
+    /// `(t5, t6)`).
     steps: Vec<(Node, Node)>,
     /// Edges added and removed by the current step (tabu lists).
     added: Vec<(Node, Node)>,
@@ -575,6 +723,8 @@ impl<'a> Opt<'a> {
             journal: Vec::new(),
             pops: 0,
             lk: LkState::default(),
+            step: STEP,
+            lk3_alpha: LK3_ALPHA,
         };
         opt.reset_positions();
         opt
@@ -821,8 +971,7 @@ impl<'a> Opt<'a> {
                         };
                         let gain = g3 + d(t5, t6) - d(t6, t1);
                         if gain > 0 {
-                            self.flip(t1, t2, t3);
-                            self.flip(t1, t4, t5);
+                            self.apply_seq3::<FWD>(Seq3::Flips, [t1, t2, t3, t4, t5, t6]);
                             self.push_all(&[t1, t2, t3, t4, t5, t6]);
                             return gain;
                         }
@@ -835,7 +984,7 @@ impl<'a> Opt<'a> {
                         let t6 = self.next_dir::<FWD>(t5);
                         let gain = g3 + d(t5, t6) - d(t6, t1);
                         if gain > 0 {
-                            self.or_move::<FWD>([(t1, t2), (t5, t6), (t3, t4)]);
+                            self.apply_seq3::<FWD>(Seq3::Segment, [t1, t2, t3, t4, t5, t6]);
                             self.push_all(&[t1, t2, t3, t4, t5, t6]);
                             return gain;
                         }
@@ -844,8 +993,7 @@ impl<'a> Opt<'a> {
                             let t6 = self.prev_dir::<FWD>(t5);
                             let gain = g3 + d(t5, t6) - d(t6, t1);
                             if gain > 0 {
-                                self.flip(t1, t2, t5);
-                                self.flip(t2, t5, t4);
+                                self.apply_seq3::<FWD>(Seq3::InnerFlips, [t1, t2, t3, t4, t5, t6]);
                                 self.push_all(&[t1, t2, t3, t4, t5, t6]);
                                 return gain;
                             }
@@ -855,6 +1003,234 @@ impl<'a> Opt<'a> {
             }
         }
         0
+    }
+
+    /// Applies the sequential 3-opt move that removes the tour edges
+    /// `t1-t2`, `t3-t4`, `t5-t6` and adds `t2-t3`, `t4-t5`, `t6-t1`, where
+    /// `t2` follows `t1` in direction `FWD` and `case` says how the nodes
+    /// lie (see `Seq3`). Journaled; afterwards `t6-t1` is a tour edge.
+    fn apply_seq3<const FWD: bool>(&mut self, case: Seq3, [t1, t2, t3, t4, t5, t6]: [usize; 6]) {
+        match case {
+            Seq3::Flips => {
+                self.flip(t1, t2, t3);
+                self.flip(t1, t4, t5);
+            }
+            Seq3::Segment => self.or_move::<FWD>([(t1, t2), (t5, t6), (t3, t4)]),
+            Seq3::InnerFlips => {
+                self.flip(t1, t2, t5);
+                self.flip(t2, t5, t4);
+            }
+        }
+        debug_assert!(self.succ(t1) == t6 || self.pred(t1) == t6);
+    }
+
+    /// Lin-Kernighan step from base node `t1` whose basis move is a
+    /// sequential 3-opt move (LKH's `Best3OptMove`), applied with
+    /// `apply_seq3`.
+    ///
+    /// For each tour neighbour `t2` of `t1`, the edge `t1-t2` is treated as
+    /// removed. A level evaluates, without changing the tour, every
+    /// `t3` in the candidates of `t2` with `g - d(t2,t3) > 0`, both tour
+    /// neighbours `t4` of `t3`, every `t5` in the candidates of `t4` with
+    /// `g - d23 + d34 - d45 > 0`, and the `t6` that make a valid 3-opt
+    /// move (the cases of `improve`). The first move that closes with a
+    /// positive total gain, as a 2-opt (`t4-t1`) or 3-opt (`t6-t1`) move,
+    /// is applied and ends the step. Otherwise the level applies the move
+    /// with the largest open gain `G4` and continues from `(t1, t6)`; a
+    /// move only qualifies as a continuation if `G4` exceeds the distance
+    /// from `t6` to its nearest candidate (LKH's pruning: no `t7` could
+    /// keep the gain positive otherwise) and it neither adds an edge this
+    /// step removed nor removes one it added. The first levels try up to
+    /// `LK3_BREADTH[level]` continuations (backtracking through the
+    /// journal), deeper ones only the best, up to `LK3_MAX_DEPTH` levels.
+    ///
+    /// Returns the gain (strictly positive) with the move applied and the
+    /// ends of every changed edge activated, or 0 with the tour, journal and
+    /// queue as they were.
+    fn lk3_from(&mut self, t1: usize) -> i64 {
+        if self.n() < 5 {
+            return 0;
+        }
+        for t2 in [self.succ(t1), self.pred(t1)] {
+            let start = self.journal.len();
+            let lk = &mut self.lk;
+            lk.steps.clear();
+            lk.added.clear();
+            lk.removed.clear();
+            lk.removed.push(edge(t1, t2));
+            lk.best_gain = 0;
+            if self.lk3_level(t1, t2, self.dists.get(t1, t2), 0) {
+                self.push(t1);
+                self.push(t2);
+                for i in 0..self.lk.steps.len() {
+                    let (a, b) = self.lk.steps[i];
+                    self.push(a as usize);
+                    self.push(b as usize);
+                }
+                return self.lk.best_gain;
+            }
+            debug_assert_eq!(self.journal.len(), start);
+        }
+        0
+    }
+
+    /// One level of `lk3_from` with the open edge `t1-t2` and open gain `g`.
+    fn lk3_level(&mut self, t1: usize, t2: usize, g: i64, level: usize) -> bool {
+        if self.succ(t1) == t2 {
+            self.lk3_level_dir::<true>(t1, t2, g, level)
+        } else {
+            self.lk3_level_dir::<false>(t1, t2, g, level)
+        }
+    }
+
+    /// `lk3_level` with `t2` following `t1` in direction `FWD`. Returns true
+    /// once an improving move was applied (its gain in `lk.best_gain`, its
+    /// nodes in `lk.steps`); otherwise rolls its moves back and returns
+    /// false.
+    fn lk3_level_dir<const FWD: bool>(
+        &mut self,
+        t1: usize,
+        t2: usize,
+        g: i64,
+        level: usize,
+    ) -> bool {
+        let (dists, nn) = (self.dists, self.nn);
+        let d = |a: usize, b: usize| dists.get(a, b);
+        let succ2 = self.next_dir::<FWD>(t2);
+        let deeper = level + 1 < LK3_MAX_DEPTH;
+        // Lists sorted by distance end the scans at the first candidate
+        // that fails the gain criterion; the alpha lists are scanned whole.
+        let alpha = self.lk3_alpha;
+        let sorted = !alpha;
+        let breadth = LK3_BREADTH.get(level).copied().unwrap_or(1);
+        // The best `breadth` continuations by G4, best first.
+        let mut cands = [(0_i64, Seq3::Flips, [0 as Node; 4]); LK3_MAX_BREADTH];
+        let mut num = 0;
+        let c2 = if alpha { nn.alpha_of(t2) } else { nn.of(t2) };
+        for &t3 in c2 {
+            let t3 = t3 as usize;
+            let g1 = g - d(t2, t3);
+            // Positive gain criterion.
+            if g1 <= 0 {
+                if sorted {
+                    break;
+                }
+                continue;
+            }
+            if t3 == t1 || t3 == succ2 {
+                continue;
+            }
+            for t4_after_t3 in [false, true] {
+                let t4 = if t4_after_t3 {
+                    self.next_dir::<FWD>(t3)
+                } else {
+                    self.prev_dir::<FWD>(t3)
+                };
+                let g2 = g1 + d(t3, t4);
+                if !t4_after_t3 {
+                    // t1 t2 .. t4 t3: closing with (t4, t1) is a 2-opt move.
+                    let gain = g2 - d(t4, t1);
+                    if gain > 0 {
+                        self.flip(t1, t2, t3);
+                        self.lk.steps.push((t3 as Node, t4 as Node));
+                        self.lk.best_gain = gain;
+                        return true;
+                    }
+                }
+                let (t4_succ, t4_pred) = (self.succ(t4), self.pred(t4));
+                let c4 = if alpha { nn.alpha_of(t4) } else { nn.of(t4) };
+                for &t5 in c4 {
+                    let t5 = t5 as usize;
+                    let g3 = g2 - d(t4, t5);
+                    if g3 <= 0 {
+                        if sorted {
+                            break;
+                        }
+                        continue;
+                    }
+                    if t5 == t1 || t5 == t4_succ || t5 == t4_pred {
+                        continue;
+                    }
+                    // Up to two choices of t6, as in `improve`.
+                    let mut moves = [(Seq3::Flips, 0); 2];
+                    let num_moves = if !t4_after_t3 {
+                        let t6 = if self.between_dir::<FWD>(t2, t5, t4) {
+                            self.next_dir::<FWD>(t5)
+                        } else {
+                            self.prev_dir::<FWD>(t5)
+                        };
+                        moves[0] = (Seq3::Flips, t6);
+                        1
+                    } else {
+                        if !self.between_dir::<FWD>(t2, t5, t3) {
+                            continue;
+                        }
+                        moves[0] = (Seq3::Segment, self.next_dir::<FWD>(t5));
+                        moves[1] = (Seq3::InnerFlips, self.prev_dir::<FWD>(t5));
+                        if t5 == t2 { 1 } else { 2 }
+                    };
+                    for &(case, t6) in &moves[..num_moves] {
+                        let g4 = g3 + d(t5, t6);
+                        let gain = g4 - d(t6, t1);
+                        if gain > 0 {
+                            self.apply_seq3::<FWD>(case, [t1, t2, t3, t4, t5, t6]);
+                            let lk = &mut self.lk;
+                            lk.steps.push((t3 as Node, t4 as Node));
+                            lk.steps.push((t5 as Node, t6 as Node));
+                            lk.best_gain = gain;
+                            return true;
+                        }
+                        if !deeper || (num == breadth && g4 <= cands[num - 1].0) {
+                            continue;
+                        }
+                        // No t7 can keep the gain positive (LKH's
+                        // `G4 - t6->Cost` test, with t6's closest candidate).
+                        if g4 <= d(t6, nn.of(t6)[0] as usize) {
+                            continue;
+                        }
+                        let lk = &self.lk;
+                        if lk.removed.contains(&edge(t2, t3))
+                            || lk.removed.contains(&edge(t4, t5))
+                            || lk.added.contains(&edge(t3, t4))
+                            || lk.added.contains(&edge(t5, t6))
+                        {
+                            continue;
+                        }
+                        let mut i = num.min(breadth - 1);
+                        while i > 0 && cands[i - 1].0 < g4 {
+                            cands[i] = cands[i - 1];
+                            i -= 1;
+                        }
+                        cands[i] = (g4, case, [t3, t4, t5, t6].map(|v| v as Node));
+                        num = (num + 1).min(breadth);
+                    }
+                }
+            }
+        }
+
+        for &(g4, case, ts) in &cands[..num] {
+            let [t3, t4, t5, t6] = ts.map(|v| v as usize);
+            let mark = self.journal.len();
+            self.apply_seq3::<FWD>(case, [t1, t2, t3, t4, t5, t6]);
+            let lk = &mut self.lk;
+            lk.steps.push((t3 as Node, t4 as Node));
+            lk.steps.push((t5 as Node, t6 as Node));
+            lk.added.push(edge(t2, t3));
+            lk.added.push(edge(t4, t5));
+            lk.removed.push(edge(t3, t4));
+            lk.removed.push(edge(t5, t6));
+            if self.lk3_level(t1, t6, g4, level + 1) {
+                return true;
+            }
+            self.rollback(mark);
+            let lk = &mut self.lk;
+            for _ in 0..2 {
+                lk.steps.pop();
+                lk.added.pop();
+                lk.removed.pop();
+            }
+        }
+        false
     }
 
     /// Lin-Kernighan step from base node `t1`, built from journaled flips.
@@ -1012,9 +1388,21 @@ impl<'a> Opt<'a> {
                 break;
             }
             // LK first; the 2-opt/3-opt moves (in particular the pure
-            // segment moves, which LK cannot express) only when it fails.
-            let gain = self.lk_from(v);
-            total += if gain > 0 { gain } else { self.improve_both(v) };
+            // segment moves, which LK on flips cannot express) only when it
+            // fails.
+            total += match self.step {
+                Step::Lk => match self.lk_from(v) {
+                    0 => self.improve_both(v),
+                    gain => gain,
+                },
+                Step::Lk3 => match self.lk3_from(v) {
+                    0 => self.improve_both(v),
+                    gain => gain,
+                },
+                // `lk3_from` gives up below 5 nodes.
+                Step::Lk3Only if self.n() < 5 => self.improve_both(v),
+                Step::Lk3Only => self.lk3_from(v),
+            };
         }
         total
     }
@@ -1384,7 +1772,42 @@ mod tests {
         let nn = Neighbours::new(&d, &Budget::unlimited());
         for i in 0..5 {
             assert_eq!(nn.of(i).len(), 4);
+            assert_eq!(nn.alpha_of(i).len(), 4);
         }
+    }
+
+    #[test]
+    fn alpha_neighbours_extend_the_nearest_ones() {
+        let d = euclidean(300, 4);
+        let near = Neighbours::new(&d, &Budget::unlimited());
+        let alpha = Neighbours::build(&d, &Budget::unlimited(), 2, Candidates::Alpha).unwrap();
+        assert!(alpha.k >= NEIGH_LIMIT && alpha.k <= NEIGH_LIMIT + ALPHA_LIMIT);
+        for i in 0..300 {
+            // Without an ascent `alpha_of` is the start of the nearest list.
+            assert_eq!(near.alpha_of(i), &near.of(i)[..ALPHA_LIMIT]);
+            // With one, the main list holds the nearest and the alpha lists
+            // and stays sorted by distance.
+            let row = alpha.of(i);
+            assert_eq!(alpha.alpha_of(i).len(), ALPHA_LIMIT);
+            assert!(near.of(i).iter().all(|j| row.contains(j)));
+            assert!(alpha.alpha_of(i).iter().all(|j| row.contains(j)));
+            assert!(
+                row.windows(2)
+                    .all(|w| (d.get(i, w[0] as usize), w[0]) < (d.get(i, w[1] as usize), w[1]))
+            );
+        }
+        // The search runs on the longer lists.
+        let start: Vec<Node> = greedy_nearest_neighbor(&d)
+            .unwrap()
+            .into_iter()
+            .map(|v| v as Node)
+            .collect();
+        let shared = SharedBest::new(cost(&d, &start), start.clone());
+        let budget = Budget::new(std::time::Instant::now(), 0.2).unwrap();
+        let mut rng = fastrand::Rng::with_seed(3);
+        search(&d, &alpha, &shared, &budget, &mut rng, true);
+        assert!(shared.cost() < cost(&d, &start));
+        assert_eq!(shared.cost(), cost(&d, &shared.into_tour()));
     }
 
     #[test]
@@ -1457,19 +1880,34 @@ mod tests {
         // (rarely, ~0.2% of kicks) miss a move between two untouched edges
         // whose relative orientation a reversal flipped, as with any
         // don't-look-bit scheme; the next kicks there pick it up.
+        //
+        // LK3 on the short alpha lists needs the `improve` fallback for this;
+        // on the full lists it is complete on its own.
         let n = NEIGH_LIMIT + 1;
-        for seed in 0..40 {
+        let steps = [
+            (Step::Lk, false),
+            (Step::Lk3, true),
+            (Step::Lk3, false),
+            (Step::Lk3Only, false),
+        ];
+        for (seed, (step, alpha)) in (0..40).flat_map(|s| steps.map(|v| (s, v))) {
             let d = euclidean(n, 100 + seed);
             let nn = Neighbours::new(&d, &Budget::unlimited());
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut tour = nodes(n);
             rng.shuffle(&mut tour);
             let mut opt = Opt::new(&d, &nn, tour);
+            opt.step = step;
+            opt.lk3_alpha = alpha;
             for _ in 0..10 {
                 opt.activate_all();
                 opt.descend(&Budget::unlimited());
                 assert!(opt.queue.is_empty());
-                assert_eq!(best_brute_force_gain(&d, &opt.tour), (0, 0), "seed {seed}");
+                assert_eq!(
+                    best_brute_force_gain(&d, &opt.tour),
+                    (0, 0),
+                    "seed {seed} {step:?} alpha {alpha}"
+                );
                 for _ in 0..10 {
                     let c = cost(&d, &opt.tour);
                     opt.kick(Kick::SegmentDoubleBridge, c, &mut rng);
@@ -1510,20 +1948,41 @@ mod tests {
 
     #[test]
     fn lk_step_gains_what_it_claims() {
-        for (n, seed) in [(5, 1), (6, 2), (9, 3), (30, 4), (200, 5)] {
+        step_gains_what_it_claims(Step::Lk, false, Candidates::Nearest);
+    }
+
+    #[test]
+    fn lk3_step_gains_what_it_claims() {
+        step_gains_what_it_claims(Step::Lk3, false, Candidates::Nearest);
+        step_gains_what_it_claims(Step::Lk3, true, Candidates::Nearest);
+        // Alpha lists after a subgradient ascent.
+        step_gains_what_it_claims(Step::Lk3, true, Candidates::Alpha);
+    }
+
+    /// A step (`lk_from` or `lk3_from`, by `kind`) changes the tour cost by exactly its
+    /// gain, keeps the positions consistent, activates the ends of every
+    /// changed edge, leaves no trace when it fails, and its journal entries
+    /// restore the old tour exactly.
+    fn step_gains_what_it_claims(kind: Step, alpha: bool, candidates: Candidates) {
+        let step = |opt: &mut Opt<'_>, t1: usize| match kind {
+            Step::Lk => opt.lk_from(t1),
+            Step::Lk3 | Step::Lk3Only => opt.lk3_from(t1),
+        };
+        for (n, seed) in [(5, 1), (6, 2), (7, 6), (9, 3), (30, 4), (200, 5), (1000, 7)] {
             let d = euclidean(n, seed);
-            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let nn = Neighbours::build(&d, &Budget::unlimited(), 1, candidates).unwrap();
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut tour = nodes(n);
             rng.shuffle(&mut tour);
             let mut opt = Opt::new(&d, &nn, tour);
+            opt.lk3_alpha = alpha;
             let mut improved = 0;
             for _ in 0..3 {
                 for t1 in 0..n {
                     let before_tour = opt.tour.clone();
                     let before = cost(&d, &opt.tour);
                     let mark = opt.journal.len();
-                    let gain = opt.lk_from(t1);
+                    let gain = step(&mut opt, t1);
                     assert!(gain >= 0);
                     assert!(is_valid(&opt.tour));
                     assert!(positions_match(&opt.tour, &opt.position));
@@ -1549,7 +2008,7 @@ mod tests {
                     opt.rollback(mark);
                     assert_eq!(opt.tour, before_tour);
                     assert!(positions_match(&opt.tour, &opt.position));
-                    assert_eq!(opt.lk_from(t1), gain);
+                    assert_eq!(step(&mut opt, t1), gain);
                     assert_eq!(opt.tour, after);
                     opt.clear_queue();
                 }
@@ -1566,6 +2025,36 @@ mod tests {
             .collect();
         e.sort_unstable();
         e
+    }
+
+    #[test]
+    fn lk3_step_finds_every_move_improve_finds() {
+        // The first LK3 level evaluates every move `improve` tries (on the
+        // main candidate lists), so when it fails `improve_both` must too.
+        let mut failures = 0;
+        for seed in 0..20 {
+            let n = 60;
+            let d = euclidean(n, 300 + seed);
+            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut opt = Opt::new(&d, &nn, nodes(n));
+            opt.lk3_alpha = false;
+            for _ in 0..200 {
+                let t1 = rng.usize(0..n);
+                if opt.lk3_from(t1) == 0 {
+                    failures += 1;
+                    assert_eq!(opt.improve_both(t1), 0, "seed {seed}");
+                }
+                opt.clear_queue();
+                if rng.u32(0..4) == 0 {
+                    let c = cost(&d, &opt.tour);
+                    opt.kick(Kick::SegmentDoubleBridge, c, &mut rng);
+                    opt.clear_queue();
+                }
+                opt.journal.clear();
+            }
+        }
+        assert!(failures > 100);
     }
 
     /// The queue descent with 2-opt and 3-opt moves only (no LK steps).
@@ -1618,34 +2107,82 @@ mod tests {
         assert_eq!(cost(&d, &opt.tour), before - gain);
     }
 
+    /// A benchmark case (run from the repo root): the distance matrix, the
+    /// optimal cost and the naive cost (the bench's score is
+    /// `0.02^((cost - opt) / (naive - opt))`).
+    fn load_case(name: &str) -> (DistMatrix, f64, f64) {
+        let text = std::fs::read_to_string(format!("cases/{name}.txt")).unwrap();
+        let mut nums = text.split_whitespace().map(|t| t.parse::<f64>().unwrap());
+        let opt_cost = nums.next().unwrap();
+        let naive = nums.next().unwrap();
+        let n = nums.next().unwrap() as usize;
+        let pts: Vec<(f64, f64)> = (0..n)
+            .map(|_| (nums.next().unwrap(), nums.next().unwrap()))
+            .collect();
+        let rows: Vec<Vec<u16>> = pts
+            .iter()
+            .map(|a| {
+                pts.iter()
+                    .map(|b| (a.0 - b.0).hypot(a.1 - b.1).round() as u16)
+                    .collect()
+            })
+            .collect();
+        (super::super::test_utils::matrix(&rows), opt_cost, naive)
+    }
+
+    /// The candidate lists for the harnesses: `CANDIDATES=alpha` runs the
+    /// full subgradient ascent (untimed), anything else the nearest lists.
+    fn harness_neighbours(d: &DistMatrix) -> Neighbours {
+        let candidates = match std::env::var("CANDIDATES").as_deref() {
+            Ok("alpha") => Candidates::Alpha,
+            _ => Candidates::Nearest,
+        };
+        Neighbours::build(d, &Budget::unlimited(), 6, candidates).unwrap()
+    }
+
+    /// The 16 cases the move harnesses default to.
+    const DEV_CASES: &str = "fl1577,fl3795,fl1400,d1291,d1655,d2103,pcb1173,pcb3038,pr2392,\
+                             u2152,rl1889,fnl4461,vm1748,rat783,pr1002,u1060";
+
+    /// Nearest-neighbour tour from `start` (ties to the lowest index).
+    fn nn_tour_from(d: &DistMatrix, start: usize) -> Vec<Node> {
+        let n = d.len();
+        let mut used = vec![false; n];
+        let mut tour = vec![start as Node];
+        used[start] = true;
+        for _ in 1..n {
+            let p = *tour.last().unwrap() as usize;
+            let b = (0..n)
+                .filter(|&j| !used[j])
+                .min_by_key(|&j| d.get(p, j))
+                .unwrap();
+            used[b] = true;
+            tour.push(b as Node);
+        }
+        tour
+    }
+
     /// Compares the first local optimum from the greedy tour, 2-opt + 3-opt
-    /// against the descent with LK, on benchmark cases (run from the repo
-    /// root): `CASES=pcb442,fnl4461 cargo test --release first_local_optimum
+    /// against the descents with LK, LK3 and LK3 without the `improve`
+    /// fallback, on benchmark cases (run from the repo root; `CASES=dev` for
+    /// the 16 dev cases, `CANDIDATES=alpha` for alpha lists):
+    /// `CASES=pcb442,fnl4461 cargo test --release first_local_optimum
     /// -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn first_local_optimum() {
         use std::time::Instant;
         let names = std::env::var("CASES").unwrap_or_else(|_| "pcb442".into());
+        let names = if names == "dev" {
+            DEV_CASES.into()
+        } else {
+            names
+        };
+        let mut sums = [0.0; 8];
         for name in names.split(',') {
-            let text = std::fs::read_to_string(format!("cases/{name}.txt")).unwrap();
-            let mut nums = text.split_whitespace().map(|t| t.parse::<f64>().unwrap());
-            let opt_cost = nums.next().unwrap();
-            let _naive = nums.next().unwrap();
-            let n = nums.next().unwrap() as usize;
-            let pts: Vec<(f64, f64)> = (0..n)
-                .map(|_| (nums.next().unwrap(), nums.next().unwrap()))
-                .collect();
-            let rows: Vec<Vec<u16>> = pts
-                .iter()
-                .map(|a| {
-                    pts.iter()
-                        .map(|b| (a.0 - b.0).hypot(a.1 - b.1).round() as u16)
-                        .collect()
-                })
-                .collect();
-            let d = super::super::test_utils::matrix(&rows);
-            let nn = Neighbours::new(&d, &Budget::unlimited());
+            let (d, opt_cost, _) = load_case(name);
+            let n = d.len();
+            let nn = harness_neighbours(&d);
             let start: Vec<Node> = greedy_nearest_neighbor(&d)
                 .unwrap()
                 .into_iter()
@@ -1659,18 +2196,134 @@ mod tests {
             descend_without_lk(&mut opt);
             let (base, base_ms) = (pct(&opt.tour), t.elapsed().as_secs_f64() * 1e3);
 
-            let mut opt = Opt::new(&d, &nn, start.clone());
-            opt.activate_all();
-            let t = Instant::now();
-            opt.descend(&Budget::unlimited());
-            let (lk, lk_ms) = (pct(&opt.tour), t.elapsed().as_secs_f64() * 1e3);
-            assert!(is_valid(&opt.tour));
+            let mut row = [base, base_ms, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+            for (i, step) in [Step::Lk, Step::Lk3, Step::Lk3Only].into_iter().enumerate() {
+                let mut opt = Opt::new(&d, &nn, start.clone());
+                opt.step = step;
+                opt.activate_all();
+                let t = Instant::now();
+                opt.descend(&Budget::unlimited());
+                row[2 + 2 * i] = pct(&opt.tour);
+                row[3 + 2 * i] = t.elapsed().as_secs_f64() * 1e3;
+                assert!(is_valid(&opt.tour));
+            }
+            for (s, r) in sums.iter_mut().zip(row) {
+                *s += r;
+            }
+            let [b, bms, l, lms, l3, l3ms, o3, o3ms] = row;
             println!(
-                "{name:10} n={n:5} greedy {:6.2}% | 2-opt+3-opt {base:5.2}% {base_ms:5.2} ms \
-                 | with LK {lk:5.2}% {lk_ms:5.2} ms",
+                "{name:10} n={n:5} greedy {:6.2}% | 2+3-opt {b:5.2}% {bms:6.2} ms \
+                 | LK {l:5.2}% {lms:6.2} ms | LK3 {l3:5.2}% {l3ms:6.2} ms \
+                 | LK3 only {o3:5.2}% {o3ms:6.2} ms",
                 pct(&start)
             );
         }
+        let k = names.split(',').count() as f64;
+        let [b, bms, l, lms, l3, l3ms, o3, o3ms] = sums.map(|v| v / k);
+        println!(
+            "{:27} mean | 2+3-opt {b:5.2}% {bms:6.2} ms | LK {l:5.2}% {lms:6.2} ms \
+             | LK3 {l3:5.2}% {l3ms:6.2} ms | LK3 only {o3:5.2}% {o3ms:6.2} ms",
+            ""
+        );
+    }
+
+    /// The real search (`search_with_slack`, one thread) for a fixed wall
+    /// time from nearest-neighbour tours at nodes 0, n/4, n/2 and 3n/4,
+    /// with each step: mean % above optimal, mean bench score, kicks per
+    /// second and µs per kick. Run from the repo root, with nothing else running:
+    /// `CASES=dev SECS=0.2,1 STEPS=0,1,2 cargo test --release move_quality
+    /// -- --ignored --nocapture` (steps: 0 LK, 1 LK3, 2 LK3 only;
+    /// `CANDIDATES=alpha` for alpha lists).
+    #[test]
+    #[ignore]
+    fn move_quality() {
+        use std::time::Instant;
+        let env = |k: &str, default: &str| std::env::var(k).unwrap_or_else(|_| default.into());
+        let names = env("CASES", "dev");
+        let names = if names == "dev" {
+            DEV_CASES.into()
+        } else {
+            names
+        };
+        let secs: Vec<f64> = env("SECS", "0.2,1")
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect();
+        let steps: Vec<Step> = env("STEPS", "0,1,2")
+            .split(',')
+            .map(|v| [Step::Lk, Step::Lk3, Step::Lk3Only][v.parse::<usize>().unwrap()])
+            .collect();
+        let starts = 4;
+        for &secs in &secs {
+            // Per step: sums of mean gaps, scores, kicks per second, µs per kick.
+            let mut totals = vec![(0.0, 0.0, 0.0, 0.0); steps.len()];
+            for name in names.split(',') {
+                let (d, opt_cost, naive) = load_case(name);
+                let n = d.len();
+                let nn = harness_neighbours(&d);
+                let starts_tours: Vec<Vec<Node>> = (0..starts)
+                    .map(|s| nn_tour_from(&d, s * n / starts))
+                    .collect();
+                let mut line = format!("{secs:4}s {name:10} n={n:5}");
+                for (si, &step) in steps.iter().enumerate() {
+                    let (mut gap, mut score, mut kps) = (0.0, 0.0, 0.0);
+                    for (s, start) in starts_tours.iter().enumerate() {
+                        let shared = SharedBest::new(cost(&d, start), start.clone());
+                        let t = Instant::now();
+                        let budget = Budget::new(t, secs).unwrap();
+                        let mut rng = fastrand::Rng::with_seed(s as u64 + 1);
+                        let (_, kicks) = search_with_slack(
+                            &d,
+                            &nn,
+                            &shared,
+                            &budget,
+                            &mut rng,
+                            ACCEPT_SLACK_PER_EDGE,
+                            false,
+                            step,
+                        );
+                        let elapsed = t.elapsed().as_secs_f64();
+                        let c = shared.cost() as f64;
+                        gap += 100.0 * (c - opt_cost) / opt_cost;
+                        score += 0.02_f64.powf((c - opt_cost) / (naive - opt_cost));
+                        kps += kicks as f64 / elapsed;
+                    }
+                    let k = starts as f64;
+                    let (gap, score, kps) = (gap / k, score / k, kps / k);
+                    let us = 1e6 / kps.max(1e-9);
+                    totals[si].0 += gap;
+                    totals[si].1 += score;
+                    totals[si].2 += kps;
+                    totals[si].3 += us;
+                    line += &format!(" | {step:?} {gap:6.3}% {score:5.3} {kps:8.0}/s {us:6.1}us");
+                }
+                println!("{line}");
+            }
+            let k = names.split(',').count() as f64;
+            let mut line = format!("{secs:4}s {:16} mean", "");
+            for (si, &step) in steps.iter().enumerate() {
+                let (g, score, kps, us) = totals[si];
+                line += &format!(
+                    " | {step:?} {:6.3}% score {score:6.3} {:8.0}/s {:6.1}us",
+                    g / k,
+                    kps / k,
+                    us / k
+                );
+            }
+            println!("{line}");
+        }
+    }
+
+    #[test]
+    fn whole_budget_is_used_by_default() {
+        // `stop_when_converged` returning early is covered by
+        // `infinite_duration_terminates` (no deadline) and the Python tests
+        // (a debug build is too slow to time 100 000 kicks here).
+        let d = euclidean(30, 3);
+        let start = std::time::Instant::now();
+        let budget = Budget::new(start, 0.5).unwrap();
+        local_search(&d, &budget, 1, Some(1), &SearchOptions::default());
+        assert!(start.elapsed().as_secs_f64() >= 0.45);
     }
 
     #[test]
@@ -1679,7 +2332,7 @@ mod tests {
         let start = std::time::Instant::now() - Duration::from_secs(2);
         let past = Budget::new(start, 1.0).unwrap();
         for threads in [1, 4] {
-            let tour = local_search(&d, &past, threads, Some(1));
+            let tour = local_search(&d, &past, threads, Some(1), &SearchOptions::default());
             let tour: Vec<Node> = tour.into_iter().map(|v| v as Node).collect();
             assert!(is_valid(&tour));
         }
@@ -1698,7 +2351,14 @@ mod tests {
                 .collect();
             let shared = SharedBest::new(cost(&d, &start), start.clone());
             let budget = Budget::new(std::time::Instant::now(), 0.2).unwrap();
-            search(&d, &nn, &shared, &budget, &mut fastrand::Rng::with_seed(4));
+            search(
+                &d,
+                &nn,
+                &shared,
+                &budget,
+                &mut fastrand::Rng::with_seed(4),
+                true,
+            );
             let tracked = shared.cost();
             let tour = shared.into_tour();
             assert!(is_valid(&tour));
@@ -1712,7 +2372,7 @@ mod tests {
         // With a huge acceptance slack the walk accepts almost every kick
         // and ends far above the best tour; `shared` must still hold the
         // best tour, with its exact cost.
-        let n = 200;
+        let n = 600;
         let d = euclidean(n, 9);
         let nn = Neighbours::new(&d, &Budget::unlimited());
         let start: Vec<Node> = greedy_nearest_neighbor(&d)
@@ -1723,12 +2383,16 @@ mod tests {
         let shared = SharedBest::new(cost(&d, &start), start.clone());
         let budget = Budget::new(std::time::Instant::now(), 0.1).unwrap();
         let mut rng = fastrand::Rng::with_seed(2);
-        let walk_cost = search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0);
+        let (walk_cost, kicks) =
+            search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0, true, STEP);
         let best = shared.cost();
         let tour = shared.into_tour();
         assert!(is_valid(&tour));
         assert_eq!(best, cost(&d, &tour));
         assert!(best < cost(&d, &start));
-        assert!(walk_cost > best, "walk {walk_cost}, best {best}");
+        assert!(
+            walk_cost > best,
+            "walk {walk_cost}, best {best}, kicks {kicks}"
+        );
     }
 }

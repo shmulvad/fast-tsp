@@ -30,6 +30,7 @@ import warnings
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import List
+from typing import Literal
 from typing import Union
 
 from ._core import __version__  # type: ignore
@@ -155,7 +156,16 @@ def _check_dist_matrix_pure_python(dists: Any) -> str | None:
     return None
 
 
-def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int | None = 1) -> Tour:
+Candidates = Literal['auto', 'nearest', 'alpha']
+
+
+def find_tour(
+    dists: DistMatrix,
+    duration_seconds: float = 2.0,
+    max_threads: int | None = 1,
+    candidates: Candidates = 'auto',
+    stop_when_converged: bool = False,
+) -> Tour:
     """Find a tour using the fast heuristic.
 
     Run a local solver to find a near-optimal TSP tour. Problems of 20
@@ -168,14 +178,29 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int
     Args:
         dists: A symmetric distance matrix.
         duration_seconds: Wall-clock time budget for the call in seconds,
-            including setup. The solver returns earlier when its search has
-            converged. Ctrl-C stops the search and raises
-            ``KeyboardInterrupt``.
+            including setup. The whole budget is used unless
+            ``stop_when_converged`` is set. Ctrl-C stops the search and
+            raises ``KeyboardInterrupt``.
         max_threads: How many threads search together. More threads find
             better tours in the same time, mainly for larger problems.
             ``None`` uses one fewer than the number of available CPU cores.
             Never more than the number of cores is used. Has no effect for
             problems of 20 nodes or fewer, which are solved exactly.
+        candidates: Which neighbour lists the local search works with.
+            ``'nearest'`` uses the nearest neighbours of each node.
+            ``'alpha'`` always runs the LKH-style preprocessing (minimum
+            1-tree with subgradient-optimised node penalties) that ranks
+            neighbours by how likely their edge is to be in an optimal tour,
+            and lets the search use a deeper Lin-Kernighan step over those
+            candidates. It costs time up front (seconds for several thousand
+            nodes) but finds better tours per second on problems of more
+            than a few hundred nodes. ``'auto'`` (default) runs that
+            preprocessing only when it fits comfortably in the time budget.
+        stop_when_converged: If True, the search returns before the deadline
+            once it has gone ``max(100_000, 500 * n)`` perturbations without
+            improving the best tour. Off by default, so the solver keeps
+            looking for a better tour until the budget runs out. A budget of
+            ``float('inf')`` always stops on convergence.
 
     Returns:
         A tour that is ideally near-optimal.
@@ -188,7 +213,7 @@ def find_tour(dists: DistMatrix, duration_seconds: float = 2.0, max_threads: int
       # [0, 1]
     """
     try:
-        return __find_tour(dists, duration_seconds, max_threads)
+        return __find_tour(dists, duration_seconds, max_threads, candidates, stop_when_converged)
     except Exception as e:
         dist_matrix_error_msg = is_valid_dist_matrix(dists)
         if dist_matrix_error_msg is None:

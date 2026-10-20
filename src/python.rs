@@ -6,7 +6,7 @@ use std::time::Instant;
 use pyo3::exceptions::{PyMemoryError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::tsp::{self, Budget, DistMatrix, TspError};
+use crate::tsp::{self, Budget, Candidates, DistMatrix, SearchOptions, TspError};
 
 fn to_py_err(err: TspError) -> PyErr {
     match err {
@@ -181,21 +181,30 @@ mod _core {
     /// problems, the exact solution is guaranteed to be returned.
     /// `max_threads` threads search together (None: one fewer than the
     /// number of available CPU cores), capped at the number of cores.
+    /// `candidates` is 'auto', 'nearest' or 'alpha'. With
+    /// `stop_when_converged` the search may return before the deadline.
     #[pyfunction]
-    #[pyo3(signature = (dists, duration_seconds = 2.0, max_threads = Some(1)))]
+    #[pyo3(signature = (dists, duration_seconds = 2.0, max_threads = Some(1), candidates = "auto", stop_when_converged = false))]
     fn find_tour(
         dists: &Bound<'_, PyAny>,
         duration_seconds: f64,
         max_threads: Option<i64>,
+        candidates: &str,
+        stop_when_converged: bool,
     ) -> PyResult<Vec<usize>> {
         // Time spent reading the input counts towards the duration.
         let start = Instant::now();
         let threads = resolve_threads(max_threads)?;
+        let candidates: Candidates = candidates.parse().map_err(PyValueError::new_err)?;
+        let options = SearchOptions {
+            candidates,
+            stop_when_converged,
+        };
         let py = dists.py();
         let dists = extract_dists(dists)?;
         interruptible(py, |check_signals| {
             let budget = Budget::new(start, duration_seconds)?.with_interrupt(check_signals);
-            tsp::find_tour(&dists, &budget, threads)
+            tsp::find_tour_with(&dists, &budget, threads, None, &options)
         })
     }
 

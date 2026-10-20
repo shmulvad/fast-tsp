@@ -19,6 +19,71 @@ pub const EXACT_SOLUTION_THRESHOLD: usize = 20;
 
 pub type Tour = Vec<usize>;
 
+/// Which candidate neighbour lists the local search works with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Candidates {
+    /// Alpha-nearness lists when their preprocessing fits the time budget,
+    /// otherwise the nearest neighbours.
+    #[default]
+    Auto,
+    /// The nearest neighbours of each node.
+    Nearest,
+    /// Alpha-nearness lists (minimum 1-tree with subgradient-optimised node
+    /// penalties, as in LKH), whatever the budget. With these lists the
+    /// local search also uses a deeper step, Lin-Kernighan with a
+    /// sequential 3-opt basis move over the five alpha-nearest candidates.
+    Alpha,
+}
+
+impl Candidates {
+    /// The accepted spellings, for error messages.
+    pub const NAMES: &'static str = "'auto', 'nearest' or 'alpha'";
+
+    /// The name `FromStr` accepts for this value.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Nearest => "nearest",
+            Self::Alpha => "alpha",
+        }
+    }
+}
+
+impl fmt::Display for Candidates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for Candidates {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "nearest" => Ok(Self::Nearest),
+            "alpha" => Ok(Self::Alpha),
+            other => Err(format!(
+                "candidates must be {}, but got {other:?}",
+                Self::NAMES
+            )),
+        }
+    }
+}
+
+/// Options of the local search used for more than
+/// [`EXACT_SOLUTION_THRESHOLD`] nodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SearchOptions {
+    /// Which candidate lists to use.
+    pub candidates: Candidates,
+    /// Whether the search may return before the deadline once it has gone
+    /// `max(100_000, 500 * n)` perturbations without improving the best
+    /// tour. Off by default: the whole budget is used. A budget without a
+    /// deadline always stops on convergence, otherwise it would never end.
+    pub stop_when_converged: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TspError {
     /// Bad input. Maps to Python's `ValueError`.
@@ -213,12 +278,23 @@ impl<'a> Budget<'a> {
     }
 }
 
-/// Finds a good tour. Small problems are solved exactly. Larger ones use
-/// local search on `threads` threads (at least one) until the budget runs
-/// out or each thread has gone `max(100_000, 500 * n)` perturbations
-/// without improving the best tour.
+/// Finds a good tour with the default [`SearchOptions`]. Small problems are
+/// solved exactly. Larger ones use local search on `threads` threads (at
+/// least one) until the budget runs out.
 pub fn find_tour(dists: &DistMatrix, budget: &Budget, threads: usize) -> Result<Tour> {
-    find_tour_impl(dists, budget, threads, None)
+    find_tour_impl(dists, budget, threads, None, &SearchOptions::default())
+}
+
+/// [`find_tour`] with explicit [`SearchOptions`] and, for repeatable
+/// benchmarks, an optional seed for the random perturbations.
+pub fn find_tour_with(
+    dists: &DistMatrix,
+    budget: &Budget,
+    threads: usize,
+    seed: Option<u64>,
+    options: &SearchOptions,
+) -> Result<Tour> {
+    find_tour_impl(dists, budget, threads, seed, options)
 }
 
 /// Like [`find_tour`], but the local search draws its random perturbations
@@ -231,7 +307,13 @@ pub fn find_tour_seeded(
     threads: usize,
     seed: u64,
 ) -> Result<Tour> {
-    find_tour_impl(dists, budget, threads, Some(seed))
+    find_tour_impl(
+        dists,
+        budget,
+        threads,
+        Some(seed),
+        &SearchOptions::default(),
+    )
 }
 
 fn find_tour_impl(
@@ -239,6 +321,7 @@ fn find_tour_impl(
     budget: &Budget,
     threads: usize,
     seed: Option<u64>,
+    options: &SearchOptions,
 ) -> Result<Tour> {
     if dists.len() < 2 {
         return invalid("Need at least 2 nodes");
@@ -246,7 +329,7 @@ fn find_tour_impl(
     if dists.len() <= EXACT_SOLUTION_THRESHOLD {
         return solve_tsp_exact(dists, budget);
     }
-    let tour = local_search::local_search(dists, budget, threads, seed);
+    let tour = local_search::local_search(dists, budget, threads, seed, options);
     budget.check_interrupted()?;
     Ok(tour)
 }
