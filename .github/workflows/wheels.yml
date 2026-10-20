@@ -43,7 +43,7 @@ jobs:
           - { runner: ubuntu-latest, target: x86_64, manylinux: musllinux_1_2 }
           - { runner: ubuntu-24.04-arm, target: aarch64, manylinux: musllinux_1_2 }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build abi3 wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -112,7 +112,7 @@ jobs:
             # No Python 3.10 builds or numpy wheels exist for Windows on ARM.
             test_pythons: "3.11 3.14t 3.15+gil 3.15t"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -165,7 +165,7 @@ jobs:
           - { runner: macos-15-intel, target: x86_64 }
           - { runner: macos-latest, target: aarch64 }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: |
@@ -204,7 +204,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
