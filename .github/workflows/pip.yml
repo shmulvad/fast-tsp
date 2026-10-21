@@ -66,7 +66,8 @@ jobs:
     - uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
-    - run: pip install --upgrade pip
+    # `pip install --upgrade pip` refuses to replace a running pip.exe on Windows.
+    - run: python -m pip install --upgrade pip
     - name: Build and install
       run: pip install --verbose ".[test]"
     - name: Test
