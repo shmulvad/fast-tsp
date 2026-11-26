@@ -165,6 +165,8 @@ def find_tour(
     max_threads: int | None = 1,
     candidates: Candidates = 'auto',
     stop_when_converged: bool = False,
+    max_kicks_without_improvement: int | None = None,
+    seed: int | None = None,
 ) -> Tour:
     """Find a tour using the fast heuristic.
 
@@ -201,6 +203,18 @@ def find_tour(
             improving the best tour. Off by default, so the solver keeps
             looking for a better tour until the budget runs out. A budget of
             ``float('inf')`` always stops on convergence.
+        max_kicks_without_improvement: Replaces ``max(100_000, 500 * n)``
+            as the number of perturbations in a row without a better tour
+            after which the search counts as converged, and implies
+            ``stop_when_converged``. Small problems usually reach their best
+            tour long before the default count, so a lower value (e.g.
+            ``1000``) returns sooner; a higher one searches longer.
+        seed: Seed for the search's random choices. ``None`` (default)
+            seeds from system entropy. With a seed, ``max_threads=1`` and
+            no deadline (``duration_seconds=float('inf')``), the search is
+            fully deterministic: the same input gives the same tour
+            regardless of CPU speed or load. A finite deadline or several
+            threads make the outcome depend on timing again.
 
     Returns:
         A tour that is ideally near-optimal.
@@ -213,7 +227,15 @@ def find_tour(
       # [0, 1]
     """
     try:
-        return __find_tour(dists, duration_seconds, max_threads, candidates, stop_when_converged)
+        return __find_tour(
+            dists,
+            duration_seconds,
+            max_threads,
+            candidates,
+            stop_when_converged,
+            max_kicks_without_improvement,
+            seed,
+        )
     except Exception as e:
         dist_matrix_error_msg = is_valid_dist_matrix(dists)
         if dist_matrix_error_msg is None:

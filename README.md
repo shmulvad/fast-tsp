@@ -34,7 +34,7 @@ tour = fast_tsp.find_tour(dists)
 print(tour)  # [0, 1, 3, 2]
 ```
 
-For larger problems, `find_tour(dists, max_threads=None)` searches on all but one of the available CPU cores (the default is 1 thread). The threads share the best tour found so far, so 4 threads find tours about as good as 1 thread given 4 times as long. `duration_seconds` sets the time budget, which is used in full unless you pass `stop_when_converged=True`, and `candidates` picks the neighbour lists the search works with (`"auto"`, `"nearest"` or `"alpha"`, see the docs).
+For larger problems, `find_tour(dists, max_threads=None)` searches on all but one of the available CPU cores (the default is 1 thread). The threads share the best tour found so far, so 4 threads find tours about as good as 1 thread given 4 times as long. `duration_seconds` sets the time budget, which is used in full unless you pass `stop_when_converged=True` (or `max_kicks_without_improvement` to choose when the search counts as converged), `seed` makes the search repeatable, and `candidates` picks the neighbour lists the search works with (`"auto"`, `"nearest"` or `"alpha"`, see the docs).
 
 ### Documentation
 

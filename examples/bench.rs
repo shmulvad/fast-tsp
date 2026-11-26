@@ -273,6 +273,7 @@ fn run_config(
     let options = SearchOptions {
         candidates,
         stop_when_converged: args.stop_early,
+        ..SearchOptions::default()
     };
     // totals[r] is the summed score of repeat r.
     let mut totals = vec![0.0; args.repeats];

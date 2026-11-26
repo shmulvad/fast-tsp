@@ -120,6 +120,34 @@ of :pyt:`float('inf')` always stops on convergence.
 
     tour = fast_tsp.find_tour(dists, duration_seconds=30, stop_when_converged=True)
 
+Small problems often reach their best tour within milliseconds, long before
+the default convergence count. :pyt:`max_kicks_without_improvement` replaces
+that count (and implies :pyt:`stop_when_converged`), so such problems return
+promptly:
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(dists, duration_seconds=1.0, max_kicks_without_improvement=1000)
+
+
+Reproducible tours
+##################
+
+The search makes random choices, so repeated calls can return different tours
+of equal or near-equal cost. Pass :pyt:`seed` to make those choices
+repeatable. Since a deadline cuts the search wherever it happens to be, the
+outcome only becomes fully deterministic, independent of CPU speed and load,
+when the search stops on convergence alone: no deadline and one thread.
+
+.. code-block:: python
+
+    tour = fast_tsp.find_tour(
+        dists,
+        duration_seconds=float('inf'),
+        max_kicks_without_improvement=10_000,
+        seed=42,
+    )
+
 
 Using multiple cores
 #####################

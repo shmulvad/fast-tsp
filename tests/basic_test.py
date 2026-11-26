@@ -153,6 +153,40 @@ def test_stop_when_converged_returns_before_the_deadline():
     assert fast_tsp.is_valid_tour(n, tour)
 
 
+def test_max_kicks_without_improvement_returns_early():
+    n = 60
+    dists = _euclidean(n, 3)
+    start = time.perf_counter()
+    # Implies stop_when_converged, so the 30 s budget is not used up.
+    tour = fast_tsp.find_tour(dists, duration_seconds=30, max_kicks_without_improvement=1000)
+    assert time.perf_counter() - start < 5
+    assert fast_tsp.is_valid_tour(n, tour)
+
+
+@pytest.mark.parametrize('max_kicks', [0, -1])
+def test_errors_with_invalid_max_kicks_without_improvement(max_kicks: int):
+    with pytest.raises(ValueError, match='max_kicks_without_improvement'):
+        fast_tsp.find_tour(_euclidean(30, 0), duration_seconds=0.1, max_kicks_without_improvement=max_kicks)
+
+
+def test_seed_without_deadline_is_deterministic():
+    n = 200
+    dists = _euclidean(n, 4)
+
+    def run(seed: int) -> list[int]:
+        return fast_tsp.find_tour(dists, duration_seconds=math.inf, max_kicks_without_improvement=5000, seed=seed)
+
+    tour = run(1)
+    assert fast_tsp.is_valid_tour(n, tour)
+    assert all(run(1) == tour for _ in range(3))
+
+
+@pytest.mark.parametrize('seed', [-1, 2**64])
+def test_errors_with_out_of_range_seed(seed: int):
+    with pytest.raises(ValueError, match='seed'):
+        fast_tsp.find_tour(_euclidean(30, 0), duration_seconds=0.1, seed=seed)
+
+
 def test_max_threads_is_ignored_for_exact_problems():
     dists = _euclidean(10, 0)
     assert fast_tsp.find_tour(dists, max_threads=None) == fast_tsp.solve_tsp_exact(dists)
