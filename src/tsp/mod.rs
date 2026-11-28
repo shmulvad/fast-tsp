@@ -82,6 +82,10 @@ pub struct SearchOptions {
     /// tour. Off by default: the whole budget is used. A budget without a
     /// deadline always stops on convergence, otherwise it would never end.
     pub stop_when_converged: bool,
+    /// Replaces `max(100_000, 500 * n)` as the number of perturbations in a
+    /// row without a better tour after which a search thread counts as
+    /// converged. Setting it implies `stop_when_converged`.
+    pub max_kicks_without_improvement: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

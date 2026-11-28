@@ -80,7 +80,8 @@ const KICK_SEGMENT_MAX: usize = 200;
 const ACCEPT_SLACK_PER_EDGE: f64 = 0.1;
 /// With `SearchOptions::stop_when_converged` (or without a deadline) a
 /// search thread stops after `max(MIN_KICKS_WITHOUT_IMPROVEMENT,
-/// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour.
+/// KICKS_PER_NODE * n)` kicks in a row without a strictly better tour
+/// (`SearchOptions::max_kicks_without_improvement` replaces that count).
 /// Larger instances are bound by the time limit. Before walk restarts (see
 /// `RESTART_KICKS_PER_NODE`) this was 100 per node / 20 000, which ended
 /// runs whose walk was trapped (d1291 after 9 s of a 10 s budget, d1655 and
@@ -334,7 +335,16 @@ pub(crate) fn local_search(
 ) -> Tour {
     let mut rng = seed.map_or_else(fastrand::Rng::new, fastrand::Rng::with_seed);
     // Without a deadline the convergence rule is the only way to stop.
-    let stop = options.stop_when_converged || budget.deadline().is_none();
+    let stop = options.stop_when_converged
+        || options.max_kicks_without_improvement.is_some()
+        || budget.deadline().is_none();
+    let max_fails = if stop {
+        options
+            .max_kicks_without_improvement
+            .unwrap_or_else(|| max_kicks_without_improvement(dists.len()))
+    } else {
+        u32::MAX
+    };
     let Some(nn) = Neighbours::build(dists, budget, threads, options.candidates) else {
         // An interrupted run's tour is discarded; otherwise return the
         // cheapest reasonable tour.
@@ -350,7 +360,7 @@ pub(crate) fn local_search(
     let shared = SharedBest::new(cost(dists, &start), start);
 
     if threads <= 1 {
-        search(dists, &nn, &shared, budget, &mut rng, stop);
+        search(dists, &nn, &shared, budget, &mut rng, max_fails);
     } else {
         let stop_flag = AtomicBool::new(false);
         let deadline = budget.deadline();
@@ -361,11 +371,11 @@ pub(crate) fn local_search(
                     let mut worker_rng = rng.fork();
                     scope.spawn(move || {
                         let budget = Budget::worker(deadline, stop_flag);
-                        search(dists, nn, shared, &budget, &mut worker_rng, stop);
+                        search(dists, nn, shared, &budget, &mut worker_rng, max_fails);
                     })
                 })
                 .collect();
-            search(dists, &nn, &shared, budget, &mut rng, stop);
+            search(dists, &nn, &shared, budget, &mut rng, max_fails);
             // This thread may finish first (or be interrupted). Keep polling
             // the callback until the other threads are done.
             while !workers.iter().all(|w| w.is_finished()) {
@@ -383,9 +393,9 @@ pub(crate) fn local_search(
 /// and continue from the result if it is within the acceptance slack of the
 /// walk's record (see `ACCEPT_SLACK_PER_EDGE`), restarting the walk from a
 /// perturbed best tour when it stagnates (see `RESTART_KICKS_PER_NODE`).
-/// Stops when the budget is exceeded or, with `stop_when_converged`, after
-/// `max_kicks_without_improvement(n)` perturbations in a row that did not
-/// lead to a better tour (found by this thread or any other).
+/// Stops when the budget is exceeded or after `max_fails` perturbations in
+/// a row that did not lead to a better tour (found by this thread or any
+/// other). `u32::MAX` never stops on convergence.
 ///
 /// The cost is tracked incrementally (kick delta minus move gains), and a
 /// rejected kick is rolled back through the undo journal, so a kick costs
@@ -396,7 +406,7 @@ fn search(
     shared: &SharedBest,
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
-    stop_when_converged: bool,
+    max_fails: u32,
 ) {
     // LK3 scans the alpha lists; without an ascent they are just the five
     // nearest neighbours, on which LK3 is weaker than LK.
@@ -411,7 +421,7 @@ fn search(
         budget,
         rng,
         ACCEPT_SLACK_PER_EDGE,
-        stop_when_converged,
+        max_fails,
         step,
     );
 }
@@ -428,7 +438,7 @@ fn search_with_slack(
     budget: &Budget<'_>,
     rng: &mut fastrand::Rng,
     slack_per_edge: f64,
-    stop_when_converged: bool,
+    max_fails: u32,
     step: Step,
 ) -> (i64, u64) {
     let n = dists.len();
@@ -453,11 +463,6 @@ fn search_with_slack(
     let mean_edge = (best_cost as f64 / n as f64).max(1.0);
     let slack = (slack_per_edge * mean_edge).round() as i64;
 
-    let max_fails = if stop_when_converged {
-        max_kicks_without_improvement(n)
-    } else {
-        u32::MAX
-    };
     let mut num_iter_no_improvement: u32 = 0;
     // The walk's own record and the kicks since it last improved, for the
     // restarts (see `RESTART_KICKS_PER_NODE`). Until the first restart the
@@ -1805,7 +1810,14 @@ mod tests {
         let shared = SharedBest::new(cost(&d, &start), start.clone());
         let budget = Budget::new(std::time::Instant::now(), 0.2).unwrap();
         let mut rng = fastrand::Rng::with_seed(3);
-        search(&d, &alpha, &shared, &budget, &mut rng, true);
+        search(
+            &d,
+            &alpha,
+            &shared,
+            &budget,
+            &mut rng,
+            max_kicks_without_improvement(d.len()),
+        );
         assert!(shared.cost() < cost(&d, &start));
         assert_eq!(shared.cost(), cost(&d, &shared.into_tour()));
     }
@@ -2279,7 +2291,7 @@ mod tests {
                             &budget,
                             &mut rng,
                             ACCEPT_SLACK_PER_EDGE,
-                            false,
+                            u32::MAX,
                             step,
                         );
                         let elapsed = t.elapsed().as_secs_f64();
@@ -2327,6 +2339,38 @@ mod tests {
     }
 
     #[test]
+    fn seeded_search_without_deadline_is_deterministic() {
+        // No deadline and one thread: the tour depends only on the seed.
+        let d = euclidean(150, 4);
+        let options = SearchOptions {
+            max_kicks_without_improvement: Some(2000),
+            ..SearchOptions::default()
+        };
+        let run = |seed| local_search(&d, &Budget::unlimited(), 1, Some(seed), &options);
+        let first = run(7);
+        assert_eq!(first, run(7));
+        let first: Vec<Node> = first.into_iter().map(|v| v as Node).collect();
+        assert!(is_valid(&first));
+    }
+
+    #[test]
+    fn max_kicks_without_improvement_implies_stopping_on_convergence() {
+        // A low count returns long before the deadline, even without
+        // `stop_when_converged`.
+        let d = euclidean(100, 6);
+        let start = std::time::Instant::now();
+        let budget = Budget::new(start, 30.0).unwrap();
+        let options = SearchOptions {
+            max_kicks_without_improvement: Some(100),
+            ..SearchOptions::default()
+        };
+        let tour = local_search(&d, &budget, 2, Some(1), &options);
+        assert!(start.elapsed().as_secs_f64() < 10.0);
+        let tour: Vec<Node> = tour.into_iter().map(|v| v as Node).collect();
+        assert!(is_valid(&tour));
+    }
+
+    #[test]
     fn expired_budget_still_returns_a_tour() {
         let d = euclidean(300, 2);
         let start = std::time::Instant::now() - Duration::from_secs(2);
@@ -2357,7 +2401,7 @@ mod tests {
                 &shared,
                 &budget,
                 &mut fastrand::Rng::with_seed(4),
-                true,
+                max_kicks_without_improvement(n),
             );
             let tracked = shared.cost();
             let tour = shared.into_tour();
@@ -2383,8 +2427,16 @@ mod tests {
         let shared = SharedBest::new(cost(&d, &start), start.clone());
         let budget = Budget::new(std::time::Instant::now(), 0.1).unwrap();
         let mut rng = fastrand::Rng::with_seed(2);
-        let (walk_cost, kicks) =
-            search_with_slack(&d, &nn, &shared, &budget, &mut rng, 1000.0, true, STEP);
+        let (walk_cost, kicks) = search_with_slack(
+            &d,
+            &nn,
+            &shared,
+            &budget,
+            &mut rng,
+            1000.0,
+            max_kicks_without_improvement(d.len()),
+            STEP,
+        );
         let best = shared.cost();
         let tour = shared.into_tour();
         assert!(is_valid(&tour));

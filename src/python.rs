@@ -166,6 +166,30 @@ fn resolve_threads(max_threads: Option<i64>) -> PyResult<usize> {
     }
 }
 
+/// `max_kicks_without_improvement` must be None or a positive integer;
+/// values above `u32::MAX` are capped, which never stops in practice.
+fn resolve_max_kicks(max_kicks: Option<i64>) -> PyResult<Option<u32>> {
+    match max_kicks {
+        None => Ok(None),
+        Some(k) if k >= 1 => Ok(Some(u32::try_from(k).unwrap_or(u32::MAX))),
+        Some(k) => Err(PyValueError::new_err(format!(
+            "max_kicks_without_improvement must be a positive integer or None, but got {k}"
+        ))),
+    }
+}
+
+/// `seed` must be None or an integer in `0..2**64`.
+fn resolve_seed(seed: Option<i128>) -> PyResult<Option<u64>> {
+    seed.map(|s| {
+        u64::try_from(s).map_err(|_| {
+            PyValueError::new_err(format!(
+                "seed must be None or an integer in [0, 2**64), but got {s}"
+            ))
+        })
+    })
+    .transpose()
+}
+
 #[pyo3::pymodule]
 mod _core {
     use super::*;
@@ -182,29 +206,35 @@ mod _core {
     /// `max_threads` threads search together (None: one fewer than the
     /// number of available CPU cores), capped at the number of cores.
     /// `candidates` is 'auto', 'nearest' or 'alpha'. With
-    /// `stop_when_converged` the search may return before the deadline.
+    /// `stop_when_converged` the search may return before the deadline;
+    /// `max_kicks_without_improvement` sets when it counts as converged.
+    /// `seed` makes the search's random choices repeatable.
     #[pyfunction]
-    #[pyo3(signature = (dists, duration_seconds = 2.0, max_threads = Some(1), candidates = "auto", stop_when_converged = false))]
+    #[pyo3(signature = (dists, duration_seconds = 2.0, max_threads = Some(1), candidates = "auto", stop_when_converged = false, max_kicks_without_improvement = None, seed = None))]
     fn find_tour(
         dists: &Bound<'_, PyAny>,
         duration_seconds: f64,
         max_threads: Option<i64>,
         candidates: &str,
         stop_when_converged: bool,
+        max_kicks_without_improvement: Option<i64>,
+        seed: Option<i128>,
     ) -> PyResult<Vec<usize>> {
         // Time spent reading the input counts towards the duration.
         let start = Instant::now();
         let threads = resolve_threads(max_threads)?;
+        let seed = resolve_seed(seed)?;
         let candidates: Candidates = candidates.parse().map_err(PyValueError::new_err)?;
         let options = SearchOptions {
             candidates,
             stop_when_converged,
+            max_kicks_without_improvement: resolve_max_kicks(max_kicks_without_improvement)?,
         };
         let py = dists.py();
         let dists = extract_dists(dists)?;
         interruptible(py, |check_signals| {
             let budget = Budget::new(start, duration_seconds)?.with_interrupt(check_signals);
-            tsp::find_tour_with(&dists, &budget, threads, None, &options)
+            tsp::find_tour_with(&dists, &budget, threads, seed, &options)
         })
     }
 
